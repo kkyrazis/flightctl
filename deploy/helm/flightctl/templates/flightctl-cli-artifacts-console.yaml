@@ -1,4 +1,4 @@
-{{ if and (.Values.cliArtifacts.enabled) (eq .Values.global.target "acm")}}
+{{ if and (.Values.global.cliArtifactsEnabled) (eq .Values.global.target "acm")}}
 {{- $url := (include "flightctl.getCliArtifactsUrl" . )}}
 apiVersion: console.openshift.io/v1
 kind: ConsoleCLIDownload

@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   FLIGHTCTL_SERVER: {{ .Values.api.url | quote }}
-  {{- if (.Values.cliArtifacts).enabled }}
+  {{- if (.Values.global).cliArtifactsEnabled }}
   FLIGHTCTL_CLI_ARTIFACTS_SERVER: {{ include "flightctl.getCliArtifactsUrl" . }}
   {{- end }}
   FLIGHTCTL_SERVER_INSECURE_SKIP_VERIFY: {{ .Values.api.insecureSkipTlsVerify | quote }}

@@ -1,4 +1,4 @@
-{{- if .Values.cliArtifacts.enabled }}
+{{- if .Values.global.cliArtifactsEnabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

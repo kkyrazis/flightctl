@@ -1,4 +1,4 @@
-{{ if and (.Values.cliArtifacts.enabled) (eq (include "flightctl.getServiceExposeMethod" .) "route") }}
+{{ if and (.Values.global.cliArtifactsEnabled) (eq (include "flightctl.getServiceExposeMethod" .) "route") }}
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:

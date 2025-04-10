@@ -6,6 +6,7 @@ global:
   internalNamespace: flightctl-internal
   storageClassName: standard
   exposeServicesMethod: "nodePort"
+  cliArtifactsEnabled: true
   nodePorts:
     api: 3443
     agent: 7443
@@ -20,12 +21,11 @@ db:
   imagePullPolicy: IfNotPresent
 api:
   image:
-    image:  localhost/flightctl-api
+    image: localhost/flightctl-api
     tag: latest
     pullPolicy: IfNotPresent
   baseUIUrl: "http://localhost:9000"
 cliArtifacts:
-  enabled: true
   image:
     image: localhost/flightctl-cli-artifacts
     tag: latest

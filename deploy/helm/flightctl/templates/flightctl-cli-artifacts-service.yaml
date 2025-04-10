@@ -1,4 +1,4 @@
-{{ if .Values.cliArtifacts.enabled }}
+{{ if .Values.global.cliArtifactsEnabled }}
 apiVersion: v1
 kind: Service
 metadata:

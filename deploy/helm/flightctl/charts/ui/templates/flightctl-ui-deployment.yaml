@@ -27,7 +27,7 @@ spec:
               configMapKeyRef:
                 name: flightctl-ui
                 key: FLIGHTCTL_SERVER
-          {{- if (.Values.cliArtifacts).enabled }}
+          {{- if (.Values.global).cliArtifactsEnabled }}
           - name: FLIGHTCTL_CLI_ARTIFACTS_SERVER
             valueFrom:
               configMapKeyRef:
