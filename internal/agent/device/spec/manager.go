@@ -35,9 +35,6 @@ type manager struct {
 	lastConsumedDevice *v1alpha1.Device
 	retryableDevice    *v1alpha1.Device
 
-	// State tracking for status conditions
-	updating updatingState
-
 	log *log.PrefixLogger
 }
 
@@ -601,6 +598,10 @@ func (s *manager) onNewVersionConsumed(ctx context.Context, device *v1alpha1.Dev
 	return nil
 }
 
+func (s *manager) MarkConditions(device *v1alpha1.Device, conds ...PreProcessingCondition) error {
+	s.queue.AddWithConditions(device, conds...)
+}
+
 func writeDeviceToFile(writer fileio.Writer, device *v1alpha1.Device, filePath string) error {
 	deviceBytes, err := json.Marshal(device)
 	if err != nil {
@@ -640,4 +641,20 @@ func WithSetFailed() RollbackOption {
 	return func(cfg *rollbackConfig) {
 		cfg.setFailed = true
 	}
+}
+
+type PreProcessingCondition interface {
+	Satisified() (bool, error)
+}
+
+type delayedCondition struct {
+	nbf time.Time
+}
+
+func (c *delayedCondition) Satisified() (bool, error) {
+	return c.nbf.After(time.Now()), nil
+}
+
+func NewDelayedCondition(nbf time.Time) PreProcessingCondition {
+	return &delayedCondition{nbf: nbf}
 }

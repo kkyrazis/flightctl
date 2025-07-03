@@ -18,7 +18,8 @@ type requeueState struct {
 	// nextAvailable is the time when the template version is available to be retrieved from the queue.
 	nextAvailable time.Time
 	// tries is the number of times the template version has been requeued.
-	tries int
+	tries      int
+	conditions []PreProcessingCondition
 }
 
 // queueItem represents an item in the priority queue
@@ -198,6 +199,7 @@ func (m *queueManager) shouldEnforceDelay(state *requeueState) bool {
 		return false
 	}
 	if state.tries >= m.delayThreshold && state.nextAvailable.IsZero() {
+		state.conditions
 		state.nextAvailable = time.Now().Add(m.delayDuration)
 		m.log.Debugf("Delay enforced until: %s", state.nextAvailable)
 		return true

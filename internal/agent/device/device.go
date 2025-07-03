@@ -174,6 +174,27 @@ func (a *Agent) syncDeviceSpec(ctx context.Context) {
 		return
 	}
 
+	if err := a.policyManager.Sync(ctx, desired); err != nil {
+		a.log.Errorf("Failed to sync device spec: %v", err)
+	}
+	var conds []spec.PreProcessingCondition
+	if !a.policyManager.IsReady(ctx, policy.Download, desired) {
+		// add condition
+
+	}
+	if !a.policyManager.IsReady(ctx, policy.Update, desired) {
+		// add condition
+	}
+
+	if len(conds) > 0 {
+		a.specManager.MarkConditions()
+	}
+
+	// if isRebooted then skip checks
+	// if download isn't ready
+	// if update isn't ready
+	// add conditions to specManager.
+
 	if syncErr := a.sync(ctx, current, desired); syncErr != nil {
 		// if context is canceled return to exit the sync loop
 		if errors.Is(syncErr, context.Canceled) {
