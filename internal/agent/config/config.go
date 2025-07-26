@@ -127,6 +127,8 @@ type TPM struct {
 	Path string `json:"tpm-path,omitempty"`
 	// PersistencePath specifies the file path for TPM key blob persistence
 	PersistencePath string `json:"tpm-persistence-path,omitempty"`
+	// SkipOwnership indicates whether to skip TPM ownership establishment
+	SkipOwnership bool `json:"tpm-skip-ownership,omitempty"`
 }
 
 // DefaultSystemInfo defines the list of system information keys that are included
@@ -162,6 +164,7 @@ func NewDefault() *Config {
 			Enabled:         false,
 			Path:            DefaultTPMDevicePath,
 			PersistencePath: filepath.Join(DefaultDataDir, DefaultTPMKeyBlobFile),
+			SkipOwnership:   false,
 		},
 	}
 
@@ -358,6 +361,7 @@ func mergeConfigs(base, override *Config) {
 	overrideIfNotEmpty(&base.TPM.Enabled, override.TPM.Enabled)
 	overrideIfNotEmpty(&base.TPM.Path, override.TPM.Path)
 	overrideIfNotEmpty(&base.TPM.PersistencePath, override.TPM.PersistencePath)
+	overrideIfNotEmpty(&base.TPM.SkipOwnership, override.TPM.SkipOwnership)
 
 	for k, v := range override.DefaultLabels {
 		base.DefaultLabels[k] = v

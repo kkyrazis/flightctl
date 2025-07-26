@@ -11,17 +11,85 @@ var (
 		Type:    tpm2.TPMAlgECC,
 		NameAlg: tpm2.TPMAlgSHA256,
 		ObjectAttributes: tpm2.TPMAObject{
-			FixedTPM:             true,  //true = must stay in TPM
-			STClear:              false, //true = cannot be loaded after tpm2_clear
-			FixedParent:          true,  //true = can't be re-parented
-			SensitiveDataOrigin:  true,  //true = TPM generates all sensitive data during creation
-			UserWithAuth:         true,  //true = pw or hmac can be used in addition to authpolicy
-			AdminWithPolicy:      true,  //true = authValue cannot be used for auth
-			NoDA:                 false, //true = there are dictionary attack protections
-			EncryptedDuplication: false, //true = there are more robust protections for duplication
-			Restricted:           false, //true = cannot be used to sign data from outside tpm
-			Decrypt:              false, //true = can be used to decrypt
-			SignEncrypt:          true,  //true = for asymm, may be used to sign
+			FixedTPM:             true,  // true = must stay in TPM
+			STClear:              false, // true = cannot be loaded after tpm2_clear
+			FixedParent:          true,  // true = can't be re-parented
+			SensitiveDataOrigin:  true,  // true = TPM generates all sensitive data during creation
+			UserWithAuth:         true,  // true = pw or hmac can be used in addition to authpolicy
+			AdminWithPolicy:      true,  // true = authValue cannot be used for auth
+			NoDA:                 false, // true = there are dictionary attack protections
+			EncryptedDuplication: false, // true = there are more robust protections for duplication
+			Restricted:           false, // true = cannot be used to sign data from outside tpm
+			Decrypt:              false, // true = can be used to decrypt
+			SignEncrypt:          true,  // true = for asymm, may be used to sign
+		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCParms{
+				Scheme: tpm2.TPMTECCScheme{
+					Scheme: tpm2.TPMAlgECDSA,
+					Details: tpm2.NewTPMUAsymScheme(
+						tpm2.TPMAlgECDSA,
+						&tpm2.TPMSSigSchemeECDSA{
+							HashAlg: tpm2.TPMAlgSHA256,
+						},
+					),
+				},
+				CurveID: tpm2.TPMECCNistP256,
+			},
+		),
+		Unique: tpm2.NewTPMUPublicID(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCPoint{
+				X: tpm2.TPM2BECCParameter{Buffer: make([]byte, 32)},
+				Y: tpm2.TPM2BECCParameter{Buffer: make([]byte, 32)},
+			},
+		),
+	}
+
+	// StoragePasswordPCRSealTemplate defines a template for sealing storage hierarchy passwords using PCR policy only.
+	// This creates a keyed hash object that uses only PCR policy authorization.
+	StoragePasswordPCRSealTemplate = tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgKeyedHash,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			Decrypt:             false,
+			FixedTPM:            true,  // true = must stay in TPM
+			STClear:             false, // true = cannot be loaded after tpm2_clear
+			FixedParent:         true,  // true = can't be re-parented
+			SensitiveDataOrigin: false, // true = TPM generates all sensitive data during creation
+			UserWithAuth:        false, // false = password auth not allowed
+			AdminWithPolicy:     true,  // true = policy authorization required
+			NoDA:                true,  // true = there are dictionary attack protections
+			SignEncrypt:         false,
+		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgKeyedHash,
+			&tpm2.TPMSKeyedHashParms{
+				Scheme: tpm2.TPMTKeyedHashScheme{
+					Scheme: tpm2.TPMAlgNull,
+				},
+			},
+		),
+		Unique: tpm2.NewTPMUPublicID(
+			tpm2.TPMAlgKeyedHash,
+			&tpm2.TPM2BDigest{Buffer: make([]byte, 32)},
+		),
+		// AuthPolicy will be set dynamically based on PCR selection
+	}
+
+	// AttestationKeyTemplate defines a standard attestation key template based on go-tpm-tools AKTemplateECC.
+	// This creates an ECC restricted signing key suitable for TPM attestation operations.
+	AttestationKeyTemplate = tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgECC,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			SignEncrypt:         true, // true = can sign data
+			Restricted:          true, // true = restricted signing key for attestation
+			FixedTPM:            true, // true = must stay in TPM
+			FixedParent:         true, // true = can't be re-parented
+			SensitiveDataOrigin: true, // true = TPM generates sensitive data
+			UserWithAuth:        true, // true = password/HMAC auth supported
 		},
 		Parameters: tpm2.NewTPMUPublicParms(
 			tpm2.TPMAlgECC,
