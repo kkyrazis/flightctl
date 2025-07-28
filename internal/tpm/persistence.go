@@ -214,3 +214,12 @@ func (p *persistence) clearSealedPasswordBlob() error {
 	// Save updated blob
 	return p.saveTPMBlob(tmpBlob)
 }
+
+// clear removes the entire TPM persistence file
+func (p *persistence) clear() error {
+	err := p.rw.RemoveFile(p.path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing TPM persistence file %s: %w", p.path, err)
+	}
+	return nil
+}

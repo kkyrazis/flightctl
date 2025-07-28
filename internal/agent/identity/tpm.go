@@ -199,6 +199,10 @@ func (t *tpmProvider) CreateGRPCClient(config *base_client.Config) (grpc_v1.Rout
 func (t *tpmProvider) WipeCredentials() error {
 	// clear certificate data from memory
 	t.certificateData = nil
+	err := t.client.Clear()
+	if err != nil {
+		return fmt.Errorf("clearing tpm client: %w", err)
+	}
 	t.log.Info("Wiped TPM-stored certificate data from memory")
 	return nil
 }
