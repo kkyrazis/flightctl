@@ -103,6 +103,7 @@ func TestSync(t *testing.T) {
 				mockSystemdManager.EXPECT().EnsurePatterns(gomock.Any()).Return(nil).AnyTimes()
 				mockPrefetchManager.EXPECT().RegisterOCICollector(gomock.Any()).AnyTimes()
 				mockSpecManager.EXPECT().IsOSUpdate().Return(false).AnyTimes()
+				mockSpecManager.EXPECT().IsOSUpdatePending(gomock.Any()).Return(false, nil).AnyTimes()
 				mockSpecManager.EXPECT().CheckPolicy(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 				// GetDesired, Read, and BeforeUpdate may be called multiple times if syncDeviceSpec is called again

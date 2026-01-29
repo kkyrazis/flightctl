@@ -203,7 +203,7 @@ func (m *monitor) Remove(app Application) error {
 
 	appID := app.ID()
 	if !m.canRemoveApp(app) {
-		m.log.Errorf("%s application not found: %s", m.name, app.Name())
+		m.log.Warnf("%s application not found: %s", m.name, app.Name())
 		return nil
 	}
 

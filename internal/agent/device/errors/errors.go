@@ -47,7 +47,7 @@ var (
 	ErrUnsupportedAppType     = errors.New("unsupported application type")
 	ErrUnsupportedVolumeType  = errors.New("unsupported volume type")
 	ErrParseAppType           = errors.New("failed to parse application type")
-	ErrAppDependency          = errors.New("failed to resolve application dependency")
+	ErrAppDependency          = errors.New("application dependency")
 	ErrUnsupportedAppProvider = errors.New("unsupported application provider")
 	ErrAppLabel               = errors.New("required label not found")
 	ErrKubernetesAppsDisabled = errors.New("kubernetes applications disabled")
@@ -137,7 +137,6 @@ var (
 	ErrExtractingArtifact          = errors.New("extracting artifact")
 	ErrExtractingOCI               = errors.New("extracting oci")
 	ErrVerifyingImage              = errors.New("verifying image")
-	ErrEnsuringDependencies        = errors.New("ensuring dependencies")
 	ErrDecodingApplicationContent  = errors.New("decoding application content")
 	ErrReadingAuthFile             = errors.New("reading auth file")
 	ErrParsingAuthFile             = errors.New("parsing auth file")
@@ -183,6 +182,7 @@ var (
 	ErrUnableToParseImageReference = errors.New("unable to parse image reference into a valid bootc target")
 	ErrStageImage                  = errors.New("stage image")
 	ErrApplyImage                  = errors.New("apply image")
+	ErrOSUpdatePending             = errors.New("OS update pending")
 
 	// application lifecycle errors
 	ErrParsingComposeSpec    = errors.New("parsing compose spec")
@@ -318,7 +318,6 @@ var (
 		ErrExtractingArtifact:          codes.Unavailable,
 		ErrExtractingOCI:               codes.Internal,
 		ErrVerifyingImage:              codes.Internal,
-		ErrEnsuringDependencies:        codes.Internal,
 		ErrDecodingApplicationContent:  codes.Internal,
 		ErrReadingAuthFile:             codes.NotFound,
 		ErrParsingAuthFile:             codes.InvalidArgument,
@@ -364,6 +363,7 @@ var (
 		ErrUnableToParseImageReference: codes.InvalidArgument,
 		ErrStageImage:                  codes.Unavailable,
 		ErrApplyImage:                  codes.Unavailable,
+		ErrOSUpdatePending:             codes.Internal,
 
 		// application lifecycle errors
 		ErrParsingComposeSpec:    codes.InvalidArgument,
@@ -401,7 +401,7 @@ type stderrError struct {
 }
 
 func (e *stderrError) Error() string {
-	return fmt.Sprintf("%s: code: %d: %s", e.wrapped.Error(), e.code, e.stderr)
+	return fmt.Sprintf("%s: code: %d: %s", e.wrapped.Error(), e.code, strings.TrimSpace(e.stderr))
 }
 
 func (e *stderrError) Unwrap() error {
