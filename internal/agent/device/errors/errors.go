@@ -51,6 +51,7 @@ var (
 	ErrUnsupportedAppProvider = errors.New("unsupported application provider")
 	ErrAppLabel               = errors.New("required label not found")
 	ErrKubernetesAppsDisabled = errors.New("kubernetes applications disabled")
+	ErrKubeconfigNotFound     = errors.New("kubeconfig not found")
 
 	// compose
 	ErrNoComposeFile     = errors.New("no valid compose file found")
@@ -332,6 +333,7 @@ var (
 		ErrGettingImageDigest:          codes.Unavailable,
 		ErrGettingArtifactDigest:       codes.Unavailable,
 		ErrPrefetchCollector:           codes.Internal,
+		ErrKubeconfigNotFound:          codes.NotFound,
 
 		// config errors
 		ErrFailedToRetrieveUserID:      codes.NotFound,
@@ -501,6 +503,8 @@ func IsRetryable(err error) bool {
 		return false
 	case errors.Is(err, ErrAuthenticationFailed):
 		return false
+	case errors.Is(err, ErrKubeconfigNotFound):
+		return true
 	default:
 		// this will need to be updated as we identify more errors that are
 		// retryable but for now we will fail the update.

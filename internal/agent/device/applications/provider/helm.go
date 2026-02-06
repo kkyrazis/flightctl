@@ -197,7 +197,7 @@ func (p *helmProvider) Verify(ctx context.Context) error {
 	kubeconfigPath, err := p.clients.Kube().ResolveKubeconfig()
 	if err != nil {
 		p.log.Warnf("Cluster not available for Helm app %s: %v (will retry)", p.spec.Name, err)
-		return fmt.Errorf("resolve kubeconfig: %w: %w", err, errors.ErrRetryable)
+		return fmt.Errorf("%w: %w", errors.ErrKubeconfigNotFound, err)
 	}
 
 	chartPath := p.spec.Path
@@ -290,7 +290,7 @@ func (p *helmProvider) collectOCITargets(ctx context.Context, configProvider dep
 func (p *helmProvider) extractNestedTargets(ctx context.Context, configProvider dependency.PullConfigResolver) (*AppData, error) {
 	kubeconfigPath, err := p.clients.Kube().ResolveKubeconfig()
 	if err != nil {
-		return nil, fmt.Errorf("resolve kubeconfig: %w", err)
+		return nil, fmt.Errorf("%w: %w", errors.ErrKubeconfigNotFound, err)
 	}
 
 	valuesPaths, cleanup, err := resolveHelmValues(p.spec.Name, p.spec.Path, p.valuesFiles(), p.spec.HelmApp.Values, "", p.rw)

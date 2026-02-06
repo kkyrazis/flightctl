@@ -274,7 +274,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		systemInfoManager,
 		systemdManagerFactory,
 		pullConfigResolver,
-		specManager,
 	)
 
 	// register the application manager with the shutdown manager

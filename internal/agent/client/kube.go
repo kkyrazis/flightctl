@@ -100,7 +100,7 @@ func NewKube(
 		commandAvailable:   IsCommandAvailable,
 		binary:             options.binary,
 		kubeconfigPath:     options.kubeconfigPath,
-		kubeconfigResolved: options.kubeconfigPath != "",
+		kubeconfigResolved: options.kubeconfigSet,
 	}
 	return k
 }

@@ -10,7 +10,6 @@ import (
 	"github.com/flightctl/flightctl/internal/agent/device/dependency"
 	"github.com/flightctl/flightctl/internal/agent/device/errors"
 	"github.com/flightctl/flightctl/internal/agent/device/fileio"
-	"github.com/flightctl/flightctl/internal/agent/device/spec"
 	"github.com/flightctl/flightctl/internal/agent/device/status"
 	"github.com/flightctl/flightctl/internal/agent/device/systemd"
 	"github.com/flightctl/flightctl/internal/agent/device/systeminfo"
@@ -27,9 +26,11 @@ type manager struct {
 	podmanFactory      client.PodmanFactory
 	rwFactory          fileio.ReadWriterFactory
 	pullConfigResolver dependency.PullConfigResolver
-	specManager        spec.Manager
 	log                *log.PrefixLogger
 	bootTime           string
+
+	// osUpdatePending is cached from BeforeUpdate for use during syncDevice
+	osUpdatePending bool
 
 	// cache of extracted nested OCI targets
 	ociTargetCache *provider.OCITargetCache
@@ -46,7 +47,6 @@ func NewManager(
 	systemInfo systeminfo.Manager,
 	systemdFactory systemd.ManagerFactory,
 	pullConfigResolver dependency.PullConfigResolver,
-	specManager spec.Manager,
 ) Manager {
 	bootTime := systemInfo.BootTime()
 	return &manager{
@@ -56,7 +56,6 @@ func NewManager(
 		podmanFactory:      podmanFactory,
 		clients:            clients,
 		pullConfigResolver: pullConfigResolver,
-		specManager:        specManager,
 		log:                log,
 		bootTime:           bootTime,
 		ociTargetCache:     provider.NewOCITargetCache(),
@@ -69,12 +68,8 @@ func isDeferrableAppError(osUpdatePending bool, err error) bool {
 }
 
 func (m *manager) validateProviderDeps(ctx context.Context, p provider.Provider) error {
-	osUpdatePending, err := m.specManager.IsOSUpdatePending(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrOSUpdatePending, err)
-	}
 	if err := p.EnsureDependencies(ctx); err != nil {
-		if !isDeferrableAppError(osUpdatePending, err) {
+		if !isDeferrableAppError(m.osUpdatePending, err) {
 			return err
 		}
 		m.log.Infof("%s is missing app dependencies. Deferring application modification until after OS update: %v", p.Name(), err)
@@ -176,7 +171,10 @@ func (m *manager) Update(ctx context.Context, provider provider.Provider) error 
 	}
 }
 
-func (m *manager) BeforeUpdate(ctx context.Context, desired *v1beta1.DeviceSpec) error {
+func (m *manager) BeforeUpdate(ctx context.Context, desired *v1beta1.DeviceSpec, opts ...UpdateOpt) error {
+	o := applyUpdateOpts(opts...)
+	m.osUpdatePending = o.osUpdatePending
+
 	if desired.Applications == nil || len(*desired.Applications) == 0 {
 		m.log.Debug("No applications to pre-check")
 		return nil
@@ -202,14 +200,9 @@ func (m *manager) BeforeUpdate(ctx context.Context, desired *v1beta1.DeviceSpec)
 }
 
 func (m *manager) verifyProviders(ctx context.Context, providers []provider.Provider) error {
-	osUpdatePending, err := m.specManager.IsOSUpdatePending(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrOSUpdatePending, err)
-	}
-
 	for _, p := range providers {
 		if err := p.Verify(ctx); err != nil {
-			if !isDeferrableAppError(osUpdatePending, err) {
+			if !isDeferrableAppError(m.osUpdatePending, err) {
 				return fmt.Errorf("verify app provider: %w: %w", errors.WithElement(p.Name()), err)
 			}
 			m.log.Infof("%s is missing app dependencies. Deferring application validation until after OS update: %v", p.Name(), err)
@@ -337,11 +330,9 @@ func (m *manager) Shutdown(ctx context.Context, state shutdown.State) error {
 //
 // Caching: Nested targets are cached by application name. Cache entries store the parent
 // image digest (for image-based apps) or children list (for inline apps) for invalidation.
-func (m *manager) CollectOCITargets(ctx context.Context, current, desired *v1beta1.DeviceSpec) (*dependency.OCICollection, error) {
-	osUpdatePending, err := m.specManager.IsOSUpdatePending(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errors.ErrOSUpdatePending, err)
-	}
+func (m *manager) CollectOCITargets(ctx context.Context, current, desired *v1beta1.DeviceSpec, opts ...dependency.OCICollectOpt) (*dependency.OCICollection, error) {
+	o := dependency.ApplyOCICollectOpts(opts...)
+	osUpdatePending := o.OSUpdatePending()
 
 	collection, err := provider.CollectOCITargets(
 		ctx,

@@ -15,7 +15,6 @@ import (
 	"github.com/flightctl/flightctl/internal/agent/device/dependency"
 	"github.com/flightctl/flightctl/internal/agent/device/errors"
 	"github.com/flightctl/flightctl/internal/agent/device/fileio"
-	"github.com/flightctl/flightctl/internal/agent/device/spec"
 	"github.com/flightctl/flightctl/internal/agent/device/systemd"
 	"github.com/flightctl/flightctl/pkg/executer"
 	"github.com/flightctl/flightctl/pkg/log"
@@ -235,8 +234,6 @@ func TestManager(t *testing.T) {
 			mockSystemdMgr := systemd.NewMockManager(ctrl)
 			mockSystemdMgr.EXPECT().AddExclusions(gomock.Any()).AnyTimes()
 			mockSystemdMgr.EXPECT().RemoveExclusions(gomock.Any()).AnyTimes()
-			mockSpecManager := spec.NewMockManager(ctrl)
-			mockSpecManager.EXPECT().IsOSUpdatePending(gomock.Any()).Return(false, nil).AnyTimes()
 
 			tc.setupMocks(
 				mockExec,
@@ -266,7 +263,6 @@ func TestManager(t *testing.T) {
 				podmanMonitor:     NewPodmanMonitor(log, podmanFactory, systemdFactory, bootTime.Format(time.RFC3339), rwMockFactory),
 				kubernetesMonitor: NewKubernetesMonitor(log, cliClients, rwFactory),
 				clients:           cliClients,
-				specManager:       mockSpecManager,
 				log:               log,
 			}
 
@@ -319,8 +315,6 @@ func TestManagerRemoveApplication(t *testing.T) {
 	mockSystemdMgr := systemd.NewMockManager(ctrl)
 	mockSystemdMgr.EXPECT().AddExclusions(gomock.Any()).AnyTimes()
 	mockSystemdMgr.EXPECT().RemoveExclusions(gomock.Any()).AnyTimes()
-	mockSpecManager := spec.NewMockManager(ctrl)
-	mockSpecManager.EXPECT().IsOSUpdatePending(gomock.Any()).Return(false, nil).AnyTimes()
 
 	tempDir := t.TempDir()
 	readWriter := fileio.NewReadWriter(
@@ -369,7 +363,6 @@ func TestManagerRemoveApplication(t *testing.T) {
 		rwFactory:         rwFactory,
 		podmanMonitor:     NewPodmanMonitor(log, podmanFactory, systemdFactory, bootTime.Format(time.RFC3339), rwMockFactory),
 		kubernetesMonitor: NewKubernetesMonitor(log, cliClients, rwFactory),
-		specManager:       mockSpecManager,
 		log:               log,
 	}
 
@@ -763,8 +756,6 @@ func TestCollectOCITargetsErrorHandling(t *testing.T) {
 				mockClients := client.NewCLIClients()
 				mockPullConfigResolver := dependency.NewMockPullConfigResolver(ctrl)
 				mockPullConfigResolver.EXPECT().Options(gomock.Any()).Return(func() []client.ClientOption { return nil }).AnyTimes()
-				mockSpecMgr := spec.NewMockManager(ctrl)
-				mockSpecMgr.EXPECT().IsOSUpdatePending(gomock.Any()).Return(false, nil).AnyTimes()
 				return &manager{
 					rwFactory:          rwFactory,
 					podmanMonitor:      NewPodmanMonitor(log, podmanFactory, systemdFactory, "", rwMockFactory),
@@ -774,7 +765,6 @@ func TestCollectOCITargetsErrorHandling(t *testing.T) {
 					ociTargetCache:     provider.NewOCITargetCache(),
 					appDataCache:       provider.NewAppDataCache(),
 					pullConfigResolver: mockPullConfigResolver,
-					specManager:        mockSpecMgr,
 				}
 			},
 			expectError:   false,
@@ -831,8 +821,6 @@ func TestCollectOCITargetsErrorHandling(t *testing.T) {
 				mockClients := client.NewCLIClients()
 				mockPullConfigResolver := dependency.NewMockPullConfigResolver(ctrl)
 				mockPullConfigResolver.EXPECT().Options(gomock.Any()).Return(func() []client.ClientOption { return nil }).AnyTimes()
-				mockSpecMgr := spec.NewMockManager(ctrl)
-				mockSpecMgr.EXPECT().IsOSUpdatePending(gomock.Any()).Return(false, nil).AnyTimes()
 				return &manager{
 					rwFactory:          rwFactory,
 					podmanMonitor:      NewPodmanMonitor(log, podmanFactory, systemdFactory, "", rwMockFactory),
@@ -842,7 +830,6 @@ func TestCollectOCITargetsErrorHandling(t *testing.T) {
 					appDataCache:       provider.NewAppDataCache(),
 					clients:            mockClients,
 					pullConfigResolver: mockPullConfigResolver,
-					specManager:        mockSpecMgr,
 				}
 			},
 			expectError:   true,
@@ -984,14 +971,11 @@ func TestVerifyProvidersDeferredDependencies(t *testing.T) {
 			log := log.NewPrefixLogger("test")
 			log.SetLevel(logrus.DebugLevel)
 
-			mockSpecMgr := spec.NewMockManager(ctrl)
-			mockSpecMgr.EXPECT().IsOSUpdatePending(gomock.Any()).Return(tt.osUpdatePending, nil)
-
 			providers := tt.setupProviders(ctrl)
 
 			m := &manager{
-				log:         log,
-				specManager: mockSpecMgr,
+				log:             log,
+				osUpdatePending: tt.osUpdatePending,
 			}
 
 			err := m.verifyProviders(ctx, providers)
@@ -1068,13 +1052,9 @@ func TestCollectOCITargetsDeferredDependencies(t *testing.T) {
 				return readWriter, nil
 			}
 
-			mockSpecMgr := spec.NewMockManager(ctrl)
-			mockSpecMgr.EXPECT().IsOSUpdatePending(gomock.Any()).Return(tt.osUpdatePending, nil)
-
 			cliClients := client.NewCLIClients()
 			m := &manager{
 				log:            log,
-				specManager:    mockSpecMgr,
 				podmanFactory:  podmanFactory,
 				rwFactory:      rwFactory,
 				clients:        cliClients,
@@ -1103,7 +1083,8 @@ func TestCollectOCITargetsDeferredDependencies(t *testing.T) {
 				Applications: &[]v1beta1.ApplicationProviderSpec{providerSpec},
 			}
 
-			result, err := m.CollectOCITargets(ctx, &v1beta1.DeviceSpec{}, desired)
+			result, err := m.CollectOCITargets(ctx, &v1beta1.DeviceSpec{}, desired,
+				dependency.WithOSUpdatePending(tt.osUpdatePending))
 
 			if tt.wantErr != nil {
 				require.Error(err)

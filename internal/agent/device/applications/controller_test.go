@@ -299,50 +299,45 @@ func createTestLabels(labels map[string]string) (string, error) {
 	return string(data), nil
 }
 
-type mockProviderForSync struct {
-	id   string
-	name string
-}
-
-func (m *mockProviderForSync) ID() string   { return m.id }
-func (m *mockProviderForSync) Name() string { return m.name }
-func (m *mockProviderForSync) Spec() *provider.ApplicationSpec {
-	return &provider.ApplicationSpec{ID: m.id, Name: m.name}
-}
-func (m *mockProviderForSync) Verify(_ context.Context) error  { return nil }
-func (m *mockProviderForSync) Install(_ context.Context) error { return nil }
-func (m *mockProviderForSync) Remove(_ context.Context) error  { return nil }
-func (m *mockProviderForSync) IsEqual(other provider.Provider) bool {
-	return m.id == other.ID()
-}
-func (m *mockProviderForSync) ActionSpec() interface{}                    { return nil }
-func (m *mockProviderForSync) EnsureDependencies(_ context.Context) error { return nil }
-
-func newMockProviderForSync(id, name string) *mockProviderForSync {
-	return &mockProviderForSync{id: id, name: name}
+func newMockProviderForSync(ctrl *gomock.Controller, id, name string) *provider.MockProvider {
+	mock := provider.NewMockProvider(ctrl)
+	mock.EXPECT().ID().Return(id).AnyTimes()
+	mock.EXPECT().Name().Return(name).AnyTimes()
+	mock.EXPECT().Spec().Return(&provider.ApplicationSpec{ID: id, Name: name}).AnyTimes()
+	return mock
 }
 
 func TestSyncProviders_ContinueOnError(t *testing.T) {
 	tests := []struct {
 		name           string
-		currentProvs   []provider.Provider
-		desiredProvs   []provider.Provider
+		currentProvs   func(ctrl *gomock.Controller) []provider.Provider
+		desiredProvs   func(ctrl *gomock.Controller) []provider.Provider
 		setupMocks     func(mockManager *MockManager)
 		expectedErrors int
 	}{
 		{
-			name:         "all removes succeed",
-			currentProvs: []provider.Provider{newMockProviderForSync("app1", "App 1"), newMockProviderForSync("app2", "App 2")},
-			desiredProvs: []provider.Provider{},
+			name: "all removes succeed",
+			currentProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{
+					newMockProviderForSync(ctrl, "app1", "App 1"),
+					newMockProviderForSync(ctrl, "app2", "App 2"),
+				}
+			},
+			desiredProvs: func(ctrl *gomock.Controller) []provider.Provider { return nil },
 			setupMocks: func(mockManager *MockManager) {
 				mockManager.EXPECT().Remove(gomock.Any(), gomock.Any()).Return(nil).Times(2)
 			},
 			expectedErrors: 0,
 		},
 		{
-			name:         "first remove fails but second continues",
-			currentProvs: []provider.Provider{newMockProviderForSync("app1", "App 1"), newMockProviderForSync("app2", "App 2")},
-			desiredProvs: []provider.Provider{},
+			name: "first remove fails but second continues",
+			currentProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{
+					newMockProviderForSync(ctrl, "app1", "App 1"),
+					newMockProviderForSync(ctrl, "app2", "App 2"),
+				}
+			},
+			desiredProvs: func(ctrl *gomock.Controller) []provider.Provider { return nil },
 			setupMocks: func(mockManager *MockManager) {
 				gomock.InOrder(
 					mockManager.EXPECT().Remove(gomock.Any(), gomock.Any()).Return(errors.ErrKubernetesAppsDisabled),
@@ -352,9 +347,14 @@ func TestSyncProviders_ContinueOnError(t *testing.T) {
 			expectedErrors: 1,
 		},
 		{
-			name:         "all removes fail",
-			currentProvs: []provider.Provider{newMockProviderForSync("app1", "App 1"), newMockProviderForSync("app2", "App 2")},
-			desiredProvs: []provider.Provider{},
+			name: "all removes fail",
+			currentProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{
+					newMockProviderForSync(ctrl, "app1", "App 1"),
+					newMockProviderForSync(ctrl, "app2", "App 2"),
+				}
+			},
+			desiredProvs: func(ctrl *gomock.Controller) []provider.Provider { return nil },
 			setupMocks: func(mockManager *MockManager) {
 				mockManager.EXPECT().Remove(gomock.Any(), gomock.Any()).Return(errors.ErrKubernetesAppsDisabled).Times(2)
 			},
@@ -362,8 +362,13 @@ func TestSyncProviders_ContinueOnError(t *testing.T) {
 		},
 		{
 			name:         "ensure continues after failure",
-			currentProvs: []provider.Provider{},
-			desiredProvs: []provider.Provider{newMockProviderForSync("app1", "App 1"), newMockProviderForSync("app2", "App 2")},
+			currentProvs: func(ctrl *gomock.Controller) []provider.Provider { return nil },
+			desiredProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{
+					newMockProviderForSync(ctrl, "app1", "App 1"),
+					newMockProviderForSync(ctrl, "app2", "App 2"),
+				}
+			},
 			setupMocks: func(mockManager *MockManager) {
 				gomock.InOrder(
 					mockManager.EXPECT().Ensure(gomock.Any(), gomock.Any()).Return(errors.ErrKubernetesAppsDisabled),
@@ -373,9 +378,13 @@ func TestSyncProviders_ContinueOnError(t *testing.T) {
 			expectedErrors: 1,
 		},
 		{
-			name:         "mixed operations all continue on error",
-			currentProvs: []provider.Provider{newMockProviderForSync("old-app", "Old App")},
-			desiredProvs: []provider.Provider{newMockProviderForSync("new-app", "New App")},
+			name: "mixed operations all continue on error",
+			currentProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{newMockProviderForSync(ctrl, "old-app", "Old App")}
+			},
+			desiredProvs: func(ctrl *gomock.Controller) []provider.Provider {
+				return []provider.Provider{newMockProviderForSync(ctrl, "new-app", "New App")}
+			},
 			setupMocks: func(mockManager *MockManager) {
 				mockManager.EXPECT().Remove(gomock.Any(), gomock.Any()).Return(errors.ErrRemovingApplication)
 				mockManager.EXPECT().Ensure(gomock.Any(), gomock.Any()).Return(errors.ErrInstallingApplication)
@@ -396,7 +405,7 @@ func TestSyncProviders_ContinueOnError(t *testing.T) {
 
 			log := log.NewPrefixLogger("test")
 
-			err := syncProviders(context.Background(), log, mockManager, tt.currentProvs, tt.desiredProvs)
+			err := syncProviders(context.Background(), log, mockManager, tt.currentProvs(ctrl), tt.desiredProvs(ctrl))
 
 			if tt.expectedErrors > 0 {
 				require.Error(err)
