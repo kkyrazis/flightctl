@@ -446,7 +446,7 @@ func defaultCPUResourceMonitor() (*v1beta1.ResourceMonitor, error) {
 			{
 				Severity:    v1beta1.ResourceAlertSeverityTypeCritical,
 				Percentage:  90,
-				Duration:    "30m",
+				Duration:    "0s",
 				Description: "", // use generated description
 			},
 			{
@@ -495,7 +495,7 @@ func defaultMemoryResourceMonitor() (*v1beta1.ResourceMonitor, error) {
 			{
 				Severity:    v1beta1.ResourceAlertSeverityTypeCritical,
 				Percentage:  90,
-				Duration:    "30m",
+				Duration:    "0s",
 				Description: "", // use generated description
 			},
 			{

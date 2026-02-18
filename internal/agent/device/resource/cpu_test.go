@@ -89,6 +89,18 @@ func TestCPUMonitor(t *testing.T) {
 				v1beta1.ResourceAlertSeverityTypeCritical,
 			},
 		},
+		{
+			name: "critical alert fires immediately with 0s duration",
+			prev: &CPUUsage{User: 1000, System: 1000, Idle: 8000},
+			snapshots: []*CPUUsage{
+				{User: 1050, System: 1050, Idle: 8000}, // 100% usage
+			},
+			alertRules: []v1beta1.ResourceAlertRule{
+				{Severity: v1beta1.ResourceAlertSeverityTypeCritical, Percentage: 90, Duration: "0s"},
+			},
+			expectFiring: []v1beta1.ResourceAlertSeverityType{v1beta1.ResourceAlertSeverityTypeCritical},
+			expectUsages: []int64{100},
+		},
 	}
 
 	for _, tt := range tests {
