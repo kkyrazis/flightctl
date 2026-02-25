@@ -39,7 +39,7 @@ func (c *RPMOSTree) Rollback(ctx context.Context) error {
 	if exitCode != 0 {
 		return fmt.Errorf("rpm-ostree rollback: %s", stderr)
 	}
-	return nil
+	return c.Apply(ctx)
 }
 
 func (c *RPMOSTree) Apply(ctx context.Context) error {

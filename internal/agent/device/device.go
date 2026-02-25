@@ -317,11 +317,6 @@ func (a *Agent) shouldRollbackOS(ctx context.Context) (*v1beta1.DeviceSpec, bool
 }
 
 func (a *Agent) rebootIntoRollbackOS(ctx context.Context, desired *v1beta1.DeviceSpec) error {
-	if err := a.osManager.Rollback(ctx, desired); err != nil {
-		a.log.Errorf("Error staging rollback OS: %v", err)
-		return err
-	}
-
 	if err := a.hookManager.OnBeforeRebooting(ctx); err != nil {
 		a.log.Errorf("Error executing BeforeRebooting hook: %v", err)
 		return err
@@ -346,7 +341,7 @@ func (a *Agent) rebootIntoRollbackOS(ctx context.Context, desired *v1beta1.Devic
 		a.log.Warnf("Failed setting status: %v", updateErr)
 	}
 
-	return a.osManager.Reboot(ctx, desired)
+	return a.osManager.Rollback(ctx, desired)
 }
 
 func (a *Agent) updatedStatus(ctx context.Context, desired *v1beta1.Device) error {

@@ -22,7 +22,7 @@ type Client interface {
 	Status(ctx context.Context) (*Status, error)
 	// Switch prepares the system to switch to the specified OS image
 	Switch(ctx context.Context, image string) error
-	// Rollback stages the previous deployment for the next boot
+	// Rollback stages the previous deployment and reboots into it
 	Rollback(ctx context.Context) error
 	// Apply applies the OS changes, potentially triggering a reboot
 	Apply(ctx context.Context) error
@@ -31,8 +31,8 @@ type Client interface {
 type Manager interface {
 	BeforeUpdate(ctx context.Context, current, desired *v1beta1.DeviceSpec) error
 	AfterUpdate(ctx context.Context, desired *v1beta1.DeviceSpec) error
-	// Rollback stages the previous deployment for the next boot.
-	// It validates that the rollback deployment matches the expected image from the spec.
+	// Rollback validates that the rollback deployment matches the expected image
+	// from the spec, then stages the previous deployment and reboots into it.
 	Rollback(ctx context.Context, desired *v1beta1.DeviceSpec) error
 	Reboot(ctx context.Context, desired *v1beta1.DeviceSpec) error
 
