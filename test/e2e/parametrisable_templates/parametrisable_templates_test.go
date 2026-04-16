@@ -3,7 +3,6 @@ package parametrisabletemplates
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/flightctl/flightctl/api/core/v1beta1"
@@ -14,7 +13,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-const fleetControllerErrorAnnotation = "fleet-controller/lastRolloutError"
+const fleetControllerErrorAnnotation = v1beta1.DeviceAnnotationLastRolloutError
 
 var (
 	fleetSelectorKey                  = "fleet"
@@ -63,7 +62,7 @@ var (
 	inlineAppEnvVars                  = map[string]string{"LOG_MESSAGE": "Hello from FlightControl (Inline Ref)"}
 	pullPolicy                        = v1beta1.PullIfNotPresent
 	fixedContainerTag                 = "alpine"
-	fixedQuadletTag                   = "with-image-ref"
+	fixedQuadletTag                   = "latest"
 	fixedArtifactTag                  = "latest"
 	fixedInlineTag                    = "v1"
 	deviceCouldNotBeUpdatedToFleetMsg = "The device could not be updated to the fleet"
@@ -425,7 +424,7 @@ var _ = Describe("Template variables in the device configuration", func() {
 
 				By("Verify fleet controller error annotation is set")
 				Eventually(func() error {
-					return checkFleetControllerErrorAnnotation(harness, deviceId, "no entry for key \"team\"")
+					return harness.CheckFleetControllerErrorAnnotation(deviceId, "no entry for key \"team\"")
 				}, 30*time.Second, testutil.POLLING).Should(BeNil(), "Fleet controller error annotation should be set with correct error message")
 
 				resp, err := harness.Client.GetDeviceStatusWithResponse(harness.Context, deviceId)
@@ -788,10 +787,8 @@ var _ = Describe("Template variables in the device configuration", func() {
 				Expect(refs.QuadletImage).To(Equal(fmt.Sprintf("%s:%s", quadletArtifactImage, quadletLabelValue)))
 				Expect(refs.QuadletVolRef).To(Equal(fmt.Sprintf("%s:%s", modelArtifactImage, artifactLabelValue)))
 				Expect(refs.InlineContent).To(ContainSubstring(fmt.Sprintf("%s:%s", alpineImage, inlineTag)))
-				Expect(refs.ContainerImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletVolRef).ToNot(ContainSubstring("{{"))
-				Expect(refs.InlineContent).ToNot(ContainSubstring("{{"))
+				Expect([]string{refs.ContainerImage, refs.QuadletImage, refs.QuadletVolRef, refs.InlineContent}).
+					ToNot(ContainElement(ContainSubstring("{{")))
 
 				By("Ensure that all applications start properly")
 				harness.WaitForApplicationRunningStatus(deviceId, containerAppName)
@@ -819,10 +816,8 @@ var _ = Describe("Template variables in the device configuration", func() {
 				Expect(refs.QuadletImage).To(Equal(fmt.Sprintf("%s:%s", quadletArtifactImage, fixedQuadletTag)))
 				Expect(refs.QuadletVolRef).To(Equal(fmt.Sprintf("%s:%s", modelArtifactImage, fixedArtifactTag)))
 				Expect(refs.InlineContent).To(ContainSubstring(fmt.Sprintf("%s:%s", alpineImage, fixedInlineTag)))
-				Expect(refs.ContainerImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletVolRef).ToNot(ContainSubstring("{{"))
-				Expect(refs.InlineContent).ToNot(ContainSubstring("{{"))
+				Expect([]string{refs.ContainerImage, refs.QuadletImage, refs.QuadletVolRef, refs.InlineContent}).
+					ToNot(ContainElement(ContainSubstring("{{")))
 
 				By("Ensure that all applications are running after the update")
 				harness.WaitForApplicationRunningStatus(deviceId, containerAppName)
@@ -865,7 +860,7 @@ var _ = Describe("Template variables in the device configuration", func() {
 
 				By("Verify fleet controller error annotation references the missing artifact label")
 				Eventually(func() error {
-					return checkFleetControllerErrorAnnotation(harness, deviceId, "no entry for key \"artifact\"")
+					return harness.CheckFleetControllerErrorAnnotation(deviceId, "no entry for key \"artifact\"")
 				}, 30*time.Second, testutil.POLLING).Should(BeNil(), "Fleet controller error annotation should reference missing artifact label")
 
 				resp, err := harness.Client.GetDeviceStatusWithResponse(harness.Context, deviceId)
@@ -900,10 +895,8 @@ var _ = Describe("Template variables in the device configuration", func() {
 				Expect(refs.QuadletImage).To(Equal(fmt.Sprintf("%s:%s", quadletArtifactImage, quadletLabelValue)))
 				Expect(refs.QuadletVolRef).To(Equal(fmt.Sprintf("%s:%s", modelArtifactImage, artifactLabelValue)))
 				Expect(refs.InlineContent).To(ContainSubstring(fmt.Sprintf("%s:%s", alpineImage, inlineTag)))
-				Expect(refs.ContainerImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletImage).ToNot(ContainSubstring("{{"))
-				Expect(refs.QuadletVolRef).ToNot(ContainSubstring("{{"))
-				Expect(refs.InlineContent).ToNot(ContainSubstring("{{"))
+				Expect([]string{refs.ContainerImage, refs.QuadletImage, refs.QuadletVolRef, refs.InlineContent}).
+					ToNot(ContainElement(ContainSubstring("{{")))
 
 				By("Ensure that all applications start and become healthy")
 				harness.WaitForApplicationRunningStatus(deviceId, containerAppName)
@@ -920,37 +913,6 @@ func isDeviceUpdatedStatusOutOfDate(device *v1beta1.Device) bool {
 		return false
 	}
 	return device.Status.Updated.Status == v1beta1.DeviceUpdatedStatusOutOfDate
-}
-
-// checkFleetControllerErrorAnnotation verifies that the device has the fleet controller
-// error annotation set and that it contains the expected key substring. Returns an error
-// suitable for use inside Eventually blocks for retryable polling.
-func checkFleetControllerErrorAnnotation(harness *e2e.Harness, deviceId, expectedKeySubstring string) error {
-	resp, err := harness.Client.GetDeviceStatusWithResponse(harness.Context, deviceId)
-	if err != nil {
-		return fmt.Errorf("GetDeviceStatusWithResponse failed: %w", err)
-	}
-	if resp.JSON200 == nil {
-		return fmt.Errorf("expected 200 response, got %d", resp.StatusCode())
-	}
-	device := resp.JSON200
-	if device.Status.Updated.Status != v1beta1.DeviceUpdatedStatusOutOfDate {
-		return fmt.Errorf("device status is not OutOfDate, got %s", device.Status.Updated.Status)
-	}
-	if device.Metadata.Annotations == nil {
-		return fmt.Errorf("device annotations are nil")
-	}
-	errorAnnotation, exists := (*device.Metadata.Annotations)[fleetControllerErrorAnnotation]
-	if !exists || errorAnnotation == "" {
-		return fmt.Errorf("%s annotation not set", fleetControllerErrorAnnotation)
-	}
-	if !strings.Contains(errorAnnotation, expectedKeySubstring) {
-		return fmt.Errorf("%s does not contain expected substring %q, got: %s",
-			fleetControllerErrorAnnotation, expectedKeySubstring, errorAnnotation)
-	}
-	GinkgoWriter.Printf("checkFleetControllerErrorAnnotation: device %s has annotation with expected substring %q\n",
-		deviceId, expectedKeySubstring)
-	return nil
 }
 
 // getGitEnv retrieves git server configuration and SSH credentials from the auxiliary services.
