@@ -121,7 +121,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - label_filter: 'sanity && !agent'
+          - label_filter: 'sanity && !agent && !slow'
+          - label_filter: 'sanity && !agent && slow'
           - label_filter: 'sanity && agent && !slow'
           - label_filter: 'sanity && agent && slow'
     steps:
@@ -188,11 +189,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Non-Agent metrics
+          # Non-Agent metrics (split slow specs so Ginkgo shards stay time-balanced)
           ## CS9
           - os_id: cs9-bootc
             backend_type: helm
-            label_filter: 'sanity && !agent'
+            label_filter: 'sanity && !agent && !slow'
+            ginkgo_total_nodes: 3
+          - os_id: cs9-bootc
+            backend_type: helm
+            label_filter: 'sanity && !agent && slow'
             ginkgo_total_nodes: 2
           # Agent metrics
           ## CS9 Agent metrics
