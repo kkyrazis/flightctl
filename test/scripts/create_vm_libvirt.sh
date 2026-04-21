@@ -335,6 +335,9 @@ set -e
                       make golang git \
                       podman qemu-kvm sshpass skopeo
     sudo dnf --enablerepo=crb install -y libvirt-devel
+    sudo rpm --import https://dl.google.com/linux/linux_signing_key.pub && \
+    echo -e "[google-chrome]\nname=google-chrome\nbaseurl=http://dl.google.com/linux/chrome/rpm/stable/x86_64\nenabled=1\ngpgcheck=1\ngpgkey=https://dl.google.com/linux/linux_signing_key.pub" | sudo tee /etc/yum.repos.d/google-chrome.repo && \
+    sudo dnf -y install google-chrome-stable
   }
   for attempt in 1 2 3 4; do
     install_pkgs && break
