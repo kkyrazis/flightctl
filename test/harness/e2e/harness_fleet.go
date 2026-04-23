@@ -272,7 +272,28 @@ func (h *Harness) UpdateFleet(fleetName string, updateFunc func(*v1beta1.Fleet))
 	if replaceResp.StatusCode() != 200 {
 		logrus.Errorf("Unexpected http status code received: %d", replaceResp.StatusCode())
 		logrus.Errorf("Unexpected http response: %s", string(replaceResp.Body))
-		return fmt.Errorf("unexpected status code %d: %s", replaceResp.StatusCode(), string(replaceResp.Body))
+
+		statusMessage := ""
+		switch {
+		case replaceResp.JSON400 != nil:
+			statusMessage = replaceResp.JSON400.Message
+		case replaceResp.JSON401 != nil:
+			statusMessage = replaceResp.JSON401.Message
+		case replaceResp.JSON403 != nil:
+			statusMessage = replaceResp.JSON403.Message
+		case replaceResp.JSON404 != nil:
+			statusMessage = replaceResp.JSON404.Message
+		case replaceResp.JSON409 != nil:
+			statusMessage = replaceResp.JSON409.Message
+		case replaceResp.JSON429 != nil:
+			statusMessage = replaceResp.JSON429.Message
+		case replaceResp.JSON503 != nil:
+			statusMessage = replaceResp.JSON503.Message
+		default:
+			statusMessage = string(replaceResp.Body)
+		}
+
+		return fmt.Errorf("unexpected status code %d: %s", replaceResp.StatusCode(), statusMessage)
 	}
 
 	return nil
