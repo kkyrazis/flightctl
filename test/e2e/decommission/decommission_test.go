@@ -24,9 +24,7 @@ type DecommissionCLITestParams struct {
 }
 
 var _ = Describe("CLI decommission test", func() {
-
 	Context("Decommission", func() {
-
 		It("Should decommission a device via CLI", Label("decommission", "81782"), func() {
 			harness := e2e.GetWorkerHarness()
 
@@ -94,7 +92,6 @@ var _ = Describe("CLI decommission test", func() {
 	})
 
 	Context("CLI argument validation", func() {
-
 		It("Should reject invalid decommission CLI arguments", Label("88265"), func() {
 			harness := e2e.GetWorkerHarness()
 
@@ -119,7 +116,6 @@ var _ = Describe("CLI decommission test", func() {
 	})
 
 	Context("API error handling", func() {
-
 		It("Should return 404 when decommissioning a non-existent device", Label("88271"), func() {
 			harness := e2e.GetWorkerHarness()
 
@@ -183,12 +179,11 @@ var _ = Describe("CLI decommission test", func() {
 			Expect(response.HTTPResponse).NotTo(BeNil())
 			Expect(response.HTTPResponse.StatusCode).To(Equal(http.StatusBadRequest),
 				"Expected 400 for malformed JSON body, got %d", response.HTTPResponse.StatusCode)
-			Expect(string(response.Body)).To(ContainSubstring("can't decode JSON body"),
+			Expect(string(response.Body)).To(ContainSubstring("failed to decode request body"),
 				"Expected parse failure message in response body")
 			GinkgoWriter.Printf("Received expected 400 response: %s\n", string(response.Body))
 		})
 	})
-
 })
 
 // decommissionCLIEntry creates a table-driven test case for CLI argument validation.
