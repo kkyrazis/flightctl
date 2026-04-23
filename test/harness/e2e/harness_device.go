@@ -1088,6 +1088,37 @@ func (h *Harness) GetAgentConfig() (*agentcfg.Config, error) {
 	return cfg, nil
 }
 
+// CheckFleetControllerErrorAnnotation verifies that the device has the fleet controller
+// error annotation set and that it contains the expected key substring. Returns an error
+// suitable for use inside Eventually blocks for retryable polling.
+func (h *Harness) CheckFleetControllerErrorAnnotation(deviceId, expectedKeySubstring string) error {
+	resp, err := h.Client.GetDeviceStatusWithResponse(h.Context, deviceId)
+	if err != nil {
+		return fmt.Errorf("GetDeviceStatusWithResponse failed: %w", err)
+	}
+	if resp.JSON200 == nil {
+		return fmt.Errorf("expected 200 response, got %d", resp.StatusCode())
+	}
+	device := resp.JSON200
+	if device.Status.Updated.Status != v1beta1.DeviceUpdatedStatusOutOfDate {
+		return fmt.Errorf("device status is not OutOfDate, got %s", device.Status.Updated.Status)
+	}
+	if device.Metadata.Annotations == nil {
+		return fmt.Errorf("device annotations are nil")
+	}
+	errorAnnotation, exists := (*device.Metadata.Annotations)[v1beta1.DeviceAnnotationLastRolloutError]
+	if !exists || errorAnnotation == "" {
+		return fmt.Errorf("%s annotation not set", v1beta1.DeviceAnnotationLastRolloutError)
+	}
+	if !strings.Contains(errorAnnotation, expectedKeySubstring) {
+		return fmt.Errorf("%s does not contain expected substring %q, got: %s",
+			v1beta1.DeviceAnnotationLastRolloutError, expectedKeySubstring, errorAnnotation)
+	}
+	GinkgoWriter.Printf("CheckFleetControllerErrorAnnotation: device %s has annotation with expected substring %q\n",
+		deviceId, expectedKeySubstring)
+	return nil
+}
+
 // DecommissionDevice runs the CLI decommission command for the given device name.
 // Returns the CLI output and any error.
 func (h *Harness) DecommissionDevice(deviceName string) (string, error) {
