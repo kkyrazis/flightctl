@@ -275,16 +275,23 @@ var _ = Describe("VM Agent behavior during updates", Label("agent-update"), func
 			initialStatusImage, postRollbackBootID := waitForGreenbootOSRollbackFromV11BrokenAgent(harness, deviceId, false)
 
 			By("Verifying device does NOT retry the failed v11 image")
-			// Wait for the device to stabilize as Online after rollback. With greenboot-rs
-			// (0.16.x), the device may do an extra boot cycle before rolling back, causing
-			// a longer disconnect that temporarily shows as Unknown.
-			harness.WaitForDeviceContents(deviceId, "device should be online after rollback", func(device *v1beta1.Device) bool {
+			// Wait for the device to be Online on the original image. With
+			// greenboot-rs (0.16.x) the device may do extra boot cycles after
+			// rollback, so we don't pin a boot ID — just wait for Online +
+			// correct image, then capture the stable boot ID.
+			harness.WaitForDeviceContents(deviceId, "device should be online on original image after rollback", func(device *v1beta1.Device) bool {
 				return device.Status.Summary.Status == v1beta1.DeviceSummaryStatusOnline &&
-					device.Status.SystemInfo.BootID == postRollbackBootID
+					device.Status.Os.Image == initialStatusImage
 			}, TIMEOUT)
+
+			stableDev, err := harness.GetDevice(deviceId)
+			Expect(err).NotTo(HaveOccurred())
+			stableBootID := stableDev.Status.SystemInfo.BootID
+			GinkgoWriter.Printf("Stable boot ID after rollback: %s (initially captured: %s)\n", stableBootID, postRollbackBootID)
+
 			harness.EnsureDeviceContents(deviceId, "device should remain stable and not retry failed image", func(device *v1beta1.Device) bool {
 				return device.Status.Os.Image == initialStatusImage &&
-					device.Status.SystemInfo.BootID == postRollbackBootID &&
+					device.Status.SystemInfo.BootID == stableBootID &&
 					device.Status.Summary.Status == v1beta1.DeviceSummaryStatusOnline
 			}, "2m")
 			GinkgoWriter.Println("Confirmed: device did not retry the failed v11 image after rollback")
