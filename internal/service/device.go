@@ -328,11 +328,11 @@ func (h *ServiceHandler) PatchDeviceStatus(ctx context.Context, orgId uuid.UUID,
 
 func (h *ServiceHandler) GetRenderedDevice(ctx context.Context, orgId uuid.UUID, name string, params domain.GetRenderedDeviceParams) (*domain.Device, domain.Status) {
 	var (
-		isNew                 bool
-		kvRenderedVersion     string
-		err                   error
-		isAgent               bool
-		movedToConflictPaused bool
+		isNew                   bool
+		kvRenderedVersion       string
+		err                     error
+		isAgent                 bool
+		processedAwaitReconnect bool
 	)
 
 	if _, isAgent = ctx.Value(consts.AgentCtxKey).(string); isAgent {
@@ -342,10 +342,10 @@ func (h *ServiceHandler) GetRenderedDevice(ctx context.Context, orgId uuid.UUID,
 		}
 
 		// Process awaiting reconnect annotation if present and KV store contains the awaiting reconnection key
-		movedToConflictPaused = h.processAwaitingReconnectIfNeeded(ctx, orgId, name, params.KnownRenderedVersion)
+		processedAwaitReconnect = h.processAwaitingReconnectIfNeeded(ctx, orgId, name, params.KnownRenderedVersion)
 	}
 
-	if params.KnownRenderedVersion != nil && !movedToConflictPaused {
+	if params.KnownRenderedVersion != nil && !processedAwaitReconnect {
 		isNew, kvRenderedVersion, err = rendered.Bus.Instance().WaitForNewVersion(ctx, orgId, name, *params.KnownRenderedVersion)
 		if err != nil {
 			h.log.Errorf("GetRenderedDevice %s/%s: failed to wait for new rendered version: %v", orgId, name, err)
@@ -355,7 +355,8 @@ func (h *ServiceHandler) GetRenderedDevice(ctx context.Context, orgId uuid.UUID,
 			return nil, domain.StatusNoContent()
 		}
 	}
-	// When movedToConflictPaused we skip WaitForNewVersion and return the current device (200) so the agent sees ConflictPaused and invalidates lastStatus.
+	// When processedAwaitReconnect we skip WaitForNewVersion and return the current device (200)
+	// so the agent sees the updated state and re-pushes its status.
 
 	if isAgent {
 		if h.agentGate.Acquire(ctx, 1) == nil {
@@ -645,7 +646,7 @@ func (h *ServiceHandler) callbackDeviceDeleted(ctx context.Context, resourceKind
 }
 
 // processAwaitingReconnectIfNeeded processes the awaiting reconnect annotation only if the KV store contains the awaiting reconnection key.
-// Returns true if the device was moved to ConflictPaused state, false otherwise.
+// Returns true if the annotation was processed (regardless of whether the device ended up ConflictPaused or Online).
 func (h *ServiceHandler) processAwaitingReconnectIfNeeded(ctx context.Context, orgId uuid.UUID, deviceName string, deviceReportedVersion *string) bool {
 	// Check if KV store contains the awaiting reconnection key
 	key := kvstore.AwaitingReconnectionKey{
@@ -693,7 +694,7 @@ func (h *ServiceHandler) processAwaitingReconnectIfNeeded(ctx context.Context, o
 				h.log.Warnf("Failed to create conflict paused event for device %s - event is nil", deviceName)
 			}
 		}
-		return wasConflictPaused
+		return true
 	}
 	h.log.Debugf("Skipping awaiting reconnect annotation processing for device %s - KV value is not 'true' (value: %s)", deviceName, string(kvValue))
 	return false

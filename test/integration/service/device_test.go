@@ -826,7 +826,7 @@ var _ = Describe("Device Application Status Events Integration Tests", func() {
 			Expect(result2).To(BeNil())
 		})
 
-		It("returns 204 when moved to normal (Online) and version unchanged", func() {
+		It("returns 200 when moved to normal (Online) and version unchanged", func() {
 			deviceName := "awaiting-reconnect-normal-device"
 			knownVersion := "1" // device reports "1", service has "1" -> normal, not ConflictPaused
 
@@ -861,11 +861,11 @@ var _ = Describe("Device Application Status Events Integration Tests", func() {
 			params := domain.GetRenderedDeviceParams{KnownRenderedVersion: &knownVersion}
 			result, status := suite.Handler.GetRenderedDevice(agentCtx, suite.OrgID, deviceName, params)
 
-			// ProcessAwaitingReconnect runs with deviceReportedVersion from params - we pass knownVersion "1"
-			// So device version 1 <= service version 1 -> moved to normal. movedToConflictPaused=false.
-			// Version unchanged -> should return 204
-			Expect(status.Code).To(Equal(int32(204)))
-			Expect(result).To(BeNil())
+			// ProcessAwaitingReconnect runs: device version 1 <= service version 1 -> Online.
+			// WaitForNewVersion is skipped because the annotation was processed, so the agent
+			// gets a 200 with the current device and can re-push its status.
+			Expect(status.Code).To(Equal(int32(200)))
+			Expect(result).ToNot(BeNil())
 		})
 	})
 
