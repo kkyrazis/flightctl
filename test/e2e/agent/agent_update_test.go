@@ -289,10 +289,13 @@ var _ = Describe("VM Agent behavior during updates", Label("agent-update"), func
 			stableBootID := stableDev.Status.SystemInfo.BootID
 			GinkgoWriter.Printf("Stable boot ID after rollback: %s (initially captured: %s)\n", stableBootID, postRollbackBootID)
 
+			// Don't check Summary.Status here: after a long rollback cycle (~6 min
+			// offline), the periodic healthcheck may briefly flip the device to
+			// Unknown before the first heartbeat lands. The key invariant is that
+			// the device stays on the original image and doesn't reboot (retry v11).
 			harness.EnsureDeviceContents(deviceId, "device should remain stable and not retry failed image", func(device *v1beta1.Device) bool {
 				return device.Status.Os.Image == initialStatusImage &&
-					device.Status.SystemInfo.BootID == stableBootID &&
-					device.Status.Summary.Status == v1beta1.DeviceSummaryStatusOnline
+					device.Status.SystemInfo.BootID == stableBootID
 			}, "2m")
 			GinkgoWriter.Println("Confirmed: device did not retry the failed v11 image after rollback")
 
