@@ -139,14 +139,14 @@ type AffectedFleet struct {
 	// AffectedDevices Devices in this fleet or fleetless group affected by the CVE.
 	AffectedDevices int64 `json:"affectedDevices"`
 
+	// Findings Per-digest findings within this fleet or fleetless group.
+	Findings []VulnerabilityGroupItem `json:"findings"`
+
 	// FleetName Fleet metadata.name, empty for the fleetless aggregate.
 	FleetName string `json:"fleetName"`
 
 	// Fleetless True when this row represents devices not owned by a fleet.
 	Fleetless bool `json:"fleetless"`
-
-	// Images Affected images within this fleet or fleetless group.
-	Images []VulnerabilityImageRef `json:"images"`
 }
 
 // ApiVersion APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources.
@@ -410,6 +410,30 @@ type CveCountsBySeverity struct {
 	Unknown int64 `json:"unknown"`
 }
 
+// DeviceCountsBySeverity Counts of distinct devices affected in the org, bucketed by finding severity (join of devices to vulnerability_findings).
+type DeviceCountsBySeverity struct {
+	// Critical Devices whose highest severity finding is critical.
+	Critical int64 `json:"critical"`
+
+	// High Devices whose highest severity finding is high.
+	High int64 `json:"high"`
+
+	// Low Devices whose highest severity finding is low.
+	Low int64 `json:"low"`
+
+	// Medium Devices whose highest severity finding is medium.
+	Medium int64 `json:"medium"`
+
+	// None Devices whose highest severity finding is none.
+	None int64 `json:"none"`
+
+	// Total Distinct devices with at least one non-not_affected finding in scope.
+	Total int64 `json:"total"`
+
+	// Unknown Devices whose highest severity finding is unknown.
+	Unknown int64 `json:"unknown"`
+}
+
 // DeviceVulnerabilitySummaryResponse Severity summary for a single device.
 type DeviceVulnerabilitySummaryResponse struct {
 	// ApiVersion APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources.
@@ -625,17 +649,11 @@ type VulnerabilityImageRef struct {
 
 // VulnerabilityImpact Blast radius for a single CVE across fleets and fleetless devices.
 type VulnerabilityImpact struct {
-	// AdvisoryId Vendor advisory identifier when available.
-	AdvisoryId *string `json:"advisoryId,omitempty"`
-
 	// ApiVersion APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources.
 	ApiVersion ApiVersion `json:"apiVersion"`
 
 	// CveId CVE identifier for this blast radius response.
 	CveId string `json:"cveId"`
-
-	// CvssScore CVSS base score when available.
-	CvssScore *float32 `json:"cvssScore,omitempty"`
 
 	// Items Per-fleet or fleetless rows with device and image counts.
 	Items []AffectedFleet `json:"items"`
@@ -643,14 +661,20 @@ type VulnerabilityImpact struct {
 	// Kind Resource kind; always VulnerabilityImpact.
 	Kind string `json:"kind"`
 
+	// MaxCvssScore Highest CVSS base score across all affected digests.
+	MaxCvssScore *float32 `json:"maxCvssScore,omitempty"`
+
+	// MaxPublishedAt Latest advisory publish time across all affected digests.
+	MaxPublishedAt *time.Time `json:"maxPublishedAt,omitempty"`
+
 	// Metadata ListMeta describes metadata that synthetic resources must have, including lists and various status objects. A resource may have only one of {ObjectMeta, ListMeta}.
 	Metadata externalRef0.ListMeta `json:"metadata"`
 
-	// Severity Highest normalized severity for this CVE in the org.
+	// Severity Worst severity across all affected digests.
 	Severity VulnerabilityImpactSeverity `json:"severity"`
 }
 
-// VulnerabilityImpactSeverity Highest normalized severity for this CVE in the org.
+// VulnerabilityImpactSeverity Worst severity across all affected digests.
 type VulnerabilityImpactSeverity string
 
 // VulnerabilityList Paginated list of Vulnerability resources.
