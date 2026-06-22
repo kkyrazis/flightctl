@@ -1002,7 +1002,7 @@ func (s *tpmSession) nvBufferMax() uint16 {
 	}
 	for _, prop := range data.TPMProperty {
 		if prop.Property == tpm2.TPMPTNVBufferMax {
-			if prop.Value == 0 || prop.Value > uint32(^uint16(0)) {
+			if prop.Value == 0 || prop.Value > math.MaxUint16 {
 				s.log.Warnf("TPM_PT_NV_BUFFER_MAX value %d out of range, using fallback %d", prop.Value, nvReadChunkSizeFallback)
 				return nvReadChunkSizeFallback
 			}
