@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,7 +19,6 @@ import (
 	"github.com/flightctl/flightctl/pkg/executer"
 	"github.com/flightctl/flightctl/pkg/log"
 	"github.com/flightctl/flightctl/pkg/version"
-	"github.com/samber/lo"
 )
 
 // sourceCategory classifies a collection source as built-in or custom.
@@ -124,9 +124,11 @@ func buildSystemInfoStatus(sources []cachedSource) v1beta1.DeviceSystemInfoStatu
 		}
 		entry := v1beta1.SystemInfoSourceStatus{
 			LastTransitionTime: cs.lastTransitionTime,
+			Status:             v1beta1.SystemInfoSourceStatusHealthy,
 		}
-		if cs.failed && cs.message != "" {
-			entry.Message = lo.ToPtr(cs.message)
+		if cs.failed {
+			entry.Message = new(cs.message)
+			entry.Status = v1beta1.SystemInfoSourceStatusError
 		}
 		switch cs.category {
 		case sourceCategoryBuiltIn:
@@ -234,17 +236,12 @@ func collectAndBuildStatus(
 	collectCustomSources(ctx, lg, exec, reader, sources, now)
 
 	// Build output
-	additionalProperties := make(map[string]string, len(systemInfoMap))
-	for k, v := range systemInfoMap {
-		additionalProperties[k] = v
-	}
-
 	sysInfo := v1beta1.DeviceSystemInfo{
 		Architecture:         info.Architecture,
 		OperatingSystem:      info.OperatingSystem,
 		BootID:               bootID,
 		AgentVersion:         agentVer.GitVersion,
-		AdditionalProperties: additionalProperties,
+		AdditionalProperties: maps.Clone(systemInfoMap),
 	}
 
 	// Build custom info from cached values (preserves last-good on failure)
@@ -256,7 +253,7 @@ func collectAndBuildStatus(
 		}
 	}
 	if len(customValues) > 0 {
-		sysInfo.CustomInfo = lo.ToPtr(v1beta1.CustomDeviceInfo(customValues))
+		sysInfo.CustomInfo = new(v1beta1.CustomDeviceInfo(customValues))
 	}
 
 	return sysInfo, buildSystemInfoStatus(sources), sources

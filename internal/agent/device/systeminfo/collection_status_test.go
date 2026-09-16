@@ -104,15 +104,14 @@ func Test_cachedSource_transitions(t *testing.T) {
 }
 
 func Test_buildSystemInfoStatus(t *testing.T) {
-	require := require.New(t)
 	now := time.Now()
 
 	tests := []struct {
 		name           string
 		sources        []cachedSource
 		expectedStatus v1beta1.SystemInfoSummaryStatusType
-		sysInfoCount   int
-		customCount    int
+		sysInfo        map[string]v1beta1.SystemInfoSourceStatus
+		customInfo     map[string]v1beta1.SystemInfoSourceStatus
 	}{
 		{
 			name: "When all succeed it should report Healthy",
@@ -121,8 +120,12 @@ func Test_buildSystemInfoStatus(t *testing.T) {
 				{name: "myScript", category: sourceCategoryCustom, attempted: true, hasValue: true, lastTransitionTime: now},
 			},
 			expectedStatus: v1beta1.SystemInfoSummaryStatusHealthy,
-			sysInfoCount:   1,
-			customCount:    1,
+			sysInfo: map[string]v1beta1.SystemInfoSourceStatus{"cpuCores": {
+				Status: v1beta1.SystemInfoSourceStatusHealthy,
+			}},
+			customInfo: map[string]v1beta1.SystemInfoSourceStatus{"myScript": {
+				Status: v1beta1.SystemInfoSourceStatusHealthy,
+			}},
 		},
 		{
 			name: "When all fail it should report Error",
@@ -131,8 +134,12 @@ func Test_buildSystemInfoStatus(t *testing.T) {
 				{name: "myScript", category: sourceCategoryCustom, attempted: true, failed: true, message: "err", lastTransitionTime: now},
 			},
 			expectedStatus: v1beta1.SystemInfoSummaryStatusError,
-			sysInfoCount:   1,
-			customCount:    1,
+			sysInfo: map[string]v1beta1.SystemInfoSourceStatus{"cpuCores": {
+				Status: v1beta1.SystemInfoSourceStatusError,
+			}},
+			customInfo: map[string]v1beta1.SystemInfoSourceStatus{"myScript": {
+				Status: v1beta1.SystemInfoSourceStatusError,
+			}},
 		},
 		{
 			name: "When mixed it should report Degraded",
@@ -141,8 +148,12 @@ func Test_buildSystemInfoStatus(t *testing.T) {
 				{name: "bad", category: sourceCategoryCustom, attempted: true, failed: true, message: "err", lastTransitionTime: now},
 			},
 			expectedStatus: v1beta1.SystemInfoSummaryStatusDegraded,
-			sysInfoCount:   1,
-			customCount:    1,
+			sysInfo: map[string]v1beta1.SystemInfoSourceStatus{"cpuCores": {
+				Status: v1beta1.SystemInfoSourceStatusHealthy,
+			}},
+			customInfo: map[string]v1beta1.SystemInfoSourceStatus{"bad": {
+				Status: v1beta1.SystemInfoSourceStatusError,
+			}},
 		},
 		{
 			name:           "When no sources it should report Unknown",
@@ -156,17 +167,25 @@ func Test_buildSystemInfoStatus(t *testing.T) {
 				{name: "notYet", category: sourceCategoryCustom, attempted: false},
 			},
 			expectedStatus: v1beta1.SystemInfoSummaryStatusUnknown,
-			sysInfoCount:   1,
-			customCount:    0,
+			sysInfo: map[string]v1beta1.SystemInfoSourceStatus{"cpuCores": {
+				Status: v1beta1.SystemInfoSourceStatusHealthy,
+			}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			require := require.New(t)
 			status := buildSystemInfoStatus(tt.sources)
 			require.Equal(tt.expectedStatus, status.Summary.Status)
-			require.Len(status.Statuses.SystemInfo, tt.sysInfoCount)
-			require.Len(status.Statuses.CustomInfo, tt.customCount)
+			require.Len(status.Statuses.SystemInfo, len(tt.sysInfo))
+			require.Len(status.Statuses.CustomInfo, len(tt.customInfo))
+			for k, v := range tt.sysInfo {
+				require.Equal(v.Status, status.Statuses.SystemInfo[k].Status)
+			}
+			for k, v := range tt.customInfo {
+				require.Equal(v.Status, status.Statuses.CustomInfo[k].Status)
+			}
 		})
 	}
 }
