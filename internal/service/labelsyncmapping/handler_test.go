@@ -103,6 +103,14 @@ func (*fakeStore) FinalizeDelete(context.Context, uuid.UUID, string) (bool, erro
 	return false, nil
 }
 
+func (*fakeStore) GetDevice(context.Context, uuid.UUID, string) (*domain.Device, error) {
+	return nil, flterrors.ErrResourceNotFound
+}
+
+func (*fakeStore) UpdateDeviceLabels(context.Context, uuid.UUID, string, int64, int64, map[string]string) (bool, error) {
+	return false, nil
+}
+
 func mapping(name string) domain.LabelSyncMapping {
 	return domain.LabelSyncMapping{
 		Metadata: domain.ObjectMeta{Name: &name},

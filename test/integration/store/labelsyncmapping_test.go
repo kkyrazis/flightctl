@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strconv"
 	"sync"
 
 	api "github.com/flightctl/flightctl/api/core/v1beta1"
@@ -32,6 +33,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		db           *gorm.DB
 		orgID        uuid.UUID
 		otherOrgID   uuid.UUID
+		deviceStore  devicestore.Store
 		mappingStore labelsyncmappingstore.Store
 	)
 
@@ -41,6 +43,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		var err error
 		cfg, dbName, db, err = testdb.CreateTestDB(ctx, log, "", store.InitDB)
 		Expect(err).NotTo(HaveOccurred())
+		deviceStore = devicestore.NewDeviceStore(db, log.WithField("pkg", "device-store"))
 		mappingStore = labelsyncmappingstore.NewStore(db, log.WithField("pkg", "labelsyncmapping-store"))
 		organizationStore := organizationstore.NewOrganizationStore(db)
 		orgID = uuid.New()
@@ -250,6 +253,35 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		finalized, err = mappingStore.FinalizeDelete(ctx, orgID, "architecture")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(finalized).To(BeTrue())
+	})
+
+	It("When labels are reconciled it should require both the device and mapping revisions", func() {
+		labels := map[string]string{"manual": "preserved", "architecture": "stale"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "device-0", nil, nil, &labels)
+
+		device, err := mappingStore.GetDevice(ctx, orgID, "device-0")
+		Expect(err).NotTo(HaveOccurred())
+		resourceVersion, err := strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		updated, err := mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", resourceVersion, 0, map[string]string{"manual": "preserved", "architecture": "x86_64"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		device, err = mappingStore.GetDevice(ctx, orgID, "device-0")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{"manual": "preserved", "architecture": "x86_64"}))
+
+		updated, err = mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", 1, 0, map[string]string{"manual": "stale"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeFalse())
+
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		resourceVersion, err = strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		updated, err = mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", resourceVersion, 0, map[string]string{"manual": "stale"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeFalse())
 	})
 })
 
