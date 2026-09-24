@@ -2,12 +2,16 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	api "github.com/flightctl/flightctl/api/core/v1beta1"
 	"github.com/flightctl/flightctl/internal/config"
+	"github.com/flightctl/flightctl/internal/domain"
 	"github.com/flightctl/flightctl/internal/flterrors"
+	labelsyncmappingservice "github.com/flightctl/flightctl/internal/service/labelsyncmapping"
 	"github.com/flightctl/flightctl/internal/store"
 	devicestore "github.com/flightctl/flightctl/internal/store/device"
 	labelsyncmappingstore "github.com/flightctl/flightctl/internal/store/labelsyncmapping"
@@ -22,6 +26,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var _ = Describe("LabelSyncMappingStore", func() {
@@ -275,7 +280,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(updated).To(BeFalse())
 
-		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "systeminfo/architecture"))
 		Expect(err).NotTo(HaveOccurred())
 		resourceVersion, err = strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
 		Expect(err).NotTo(HaveOccurred())
@@ -525,6 +530,408 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(finalized).To(BeTrue())
 	})
+
+	It("When a device label update races with reconciliation it should retry and preserve both current outputs", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&storedMapping).Error).To(Succeed())
+
+		labels := map[string]string{"manual": "before", "unrelated": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "device-update-race", nil, nil, &labels)
+		evaluator := newBlockingLabelSyncEvaluator()
+		events := &recordingLabelSyncEvents{}
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		reconciler, err := labelsyncmappingservice.NewReconciler(reconciliationStore, evaluator, events, log)
+		Expect(err).NotTo(HaveOccurred())
+		reconcileCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		defer evaluator.releaseFirstEvaluation()
+		resultCh := make(chan integrationReconciliationResult, 1)
+		go func() {
+			result, err := reconciler.ReconcileDeviceLabels(reconcileCtx, orgID, "device-update-race")
+			resultCh <- integrationReconciliationResult{result: result, err: err}
+		}()
+
+		select {
+		case expression := <-evaluator.firstEvaluation:
+			Expect(expression).To(Equal("device.status.systemInfo.architecture"))
+		case <-reconcileCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not begin evaluating before timeout: %v", reconcileCtx.Err()))
+		}
+
+		before, err := mappingStore.GetDevice(reconcileCtx, orgID, "device-update-race")
+		Expect(err).NotTo(HaveOccurred())
+		_, _, _, err = deviceStore.Mutate(reconcileCtx, orgID, "device-update-race", before, func(mutation *devicestore.DeviceMutation) error {
+			updatedLabels := lo.FromPtr(mutation.Device.Metadata.Labels)
+			updatedLabels["manual"] = "operator-update"
+			mutation.Device.Metadata.Labels = &updatedLabels
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred())
+		evaluator.releaseFirstEvaluation()
+
+		var reconciliation integrationReconciliationResult
+		select {
+		case reconciliation = <-resultCh:
+		case <-reconcileCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not finish after the device update: %v", reconcileCtx.Err()))
+		}
+		Expect(reconciliation.err).NotTo(HaveOccurred())
+		Expect(reconciliation.result.LabelsChanged).To(BeTrue())
+		Expect(reconciliation.result.MappingOutcomes).To(HaveLen(1))
+		Expect(reconciliation.result.MappingOutcomes[0].Err).NotTo(HaveOccurred())
+		Expect(evaluator.evaluatedExpressions()).To(Equal([]string{
+			"device.status.systemInfo.architecture",
+			"device.status.systemInfo.architecture",
+		}))
+
+		device, err := mappingStore.GetDevice(ctx, orgID, "device-update-race")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
+			"architecture": "device.status.systemInfo.architecture",
+			"manual":       "operator-update",
+			"unrelated":    "preserved",
+		}))
+		var managedLabel, manualLabel model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "device-update-race", "architecture").Take(&managedLabel).Error).To(Succeed())
+		Expect(managedLabel.LabelSyncMappingID).To(Equal(&storedMapping.ID))
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "device-update-race", "manual").Take(&manualLabel).Error).To(Succeed())
+		Expect(manualLabel.LabelSyncMappingID).To(BeNil())
+		recordedEvents := events.snapshot()
+		Expect(recordedEvents).To(HaveLen(1))
+		Expect(recordedEvents[0].Reason).To(Equal(domain.EventReasonResourceUpdated))
+		details, err := recordedEvents[0].Details.AsResourceUpdatedDetails()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(details.UpdatedFields).To(Equal([]domain.ResourceUpdatedDetailsUpdatedFields{domain.Labels}))
+	})
+
+	It("When a mapping changes during evaluation it should retry using the current mapping revision", func() {
+		mappingResource := newLabelSyncMapping("architecture", "architecture")
+		mappingResource.Spec.Expression = "old-expression"
+		_, err := mappingStore.Create(ctx, orgID, mappingResource)
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&storedMapping).Error).To(Succeed())
+
+		labels := map[string]string{"manual": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "mapping-update-race", nil, nil, &labels)
+		evaluator := newBlockingLabelSyncEvaluator()
+		events := &recordingLabelSyncEvents{}
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		reconciler, err := labelsyncmappingservice.NewReconciler(reconciliationStore, evaluator, events, log)
+		Expect(err).NotTo(HaveOccurred())
+		reconcileCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		defer evaluator.releaseFirstEvaluation()
+		resultCh := make(chan integrationReconciliationResult, 1)
+		go func() {
+			result, err := reconciler.ReconcileDeviceLabels(reconcileCtx, orgID, "mapping-update-race")
+			resultCh <- integrationReconciliationResult{result: result, err: err}
+		}()
+
+		select {
+		case expression := <-evaluator.firstEvaluation:
+			Expect(expression).To(Equal("old-expression"))
+		case <-reconcileCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not begin evaluating before timeout: %v", reconcileCtx.Err()))
+		}
+
+		currentMapping, err := mappingStore.Get(reconcileCtx, orgID, "architecture")
+		Expect(err).NotTo(HaveOccurred())
+		currentMapping.Spec.Expression = "current-expression"
+		_, _, err = mappingStore.Update(reconcileCtx, orgID, currentMapping)
+		Expect(err).NotTo(HaveOccurred())
+		evaluator.releaseFirstEvaluation()
+
+		var reconciliation integrationReconciliationResult
+		select {
+		case reconciliation = <-resultCh:
+		case <-reconcileCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not finish after the mapping update: %v", reconcileCtx.Err()))
+		}
+		Expect(reconciliation.err).NotTo(HaveOccurred())
+		Expect(reconciliation.result.LabelsChanged).To(BeTrue())
+		Expect(reconciliation.result.MappingOutcomes).To(HaveLen(1))
+		Expect(reconciliation.result.MappingOutcomes[0].Err).NotTo(HaveOccurred())
+		Expect(evaluator.evaluatedExpressions()).To(Equal([]string{"old-expression", "current-expression"}))
+
+		device, err := mappingStore.GetDevice(ctx, orgID, "mapping-update-race")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
+			"architecture": "current-expression",
+			"manual":       "preserved",
+		}))
+		var managedLabel model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "mapping-update-race", "architecture").Take(&managedLabel).Error).To(Succeed())
+		Expect(managedLabel.LabelSyncMappingID).To(Equal(&storedMapping.ID))
+		recordedEvents := events.snapshot()
+		Expect(recordedEvents).To(HaveLen(1))
+		Expect(recordedEvents[0].Reason).To(Equal(domain.EventReasonResourceUpdated))
+	})
+
+	It("When a mapping mutation contends with reconciliation it should converge to the current revision", func() {
+		mappingResource := newLabelSyncMapping("architecture", "architecture")
+		mappingResource.Spec.Expression = "old-expression"
+		_, err := mappingStore.Create(ctx, orgID, mappingResource)
+		Expect(err).NotTo(HaveOccurred())
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "mapping-transaction-race", nil, nil, nil)
+
+		// Hold the revision row so both the reconciliation apply and mapping
+		// mutation enter their write transactions before either can finish.
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		revisionLock := db.WithContext(testCtx).Begin()
+		Expect(revisionLock.Error).NotTo(HaveOccurred())
+		defer revisionLock.Rollback()
+		var lockedState model.LabelSyncState
+		Expect(revisionLock.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("org_id = ? AND resource_type = ?", orgID, domain.LabelSyncMappingDevice).
+			Take(&lockedState).Error).To(Succeed())
+
+		evaluator := newBlockingLabelSyncEvaluator()
+		events := &recordingLabelSyncEvents{}
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		reconciler, err := labelsyncmappingservice.NewReconciler(reconciliationStore, evaluator, events, log)
+		Expect(err).NotTo(HaveOccurred())
+		defer evaluator.releaseFirstEvaluation()
+
+		reconciliationCh := make(chan integrationReconciliationResult, 1)
+		go func() {
+			result, err := reconciler.ReconcileDeviceLabels(testCtx, orgID, "mapping-transaction-race")
+			reconciliationCh <- integrationReconciliationResult{result: result, err: err}
+		}()
+		select {
+		case expression := <-evaluator.firstEvaluation:
+			Expect(expression).To(Equal("old-expression"))
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not begin evaluating before timeout: %v", testCtx.Err()))
+		}
+		evaluator.releaseFirstEvaluation()
+
+		mappingUpdateCh := make(chan error, 1)
+		go func() {
+			current, err := mappingStore.Get(testCtx, orgID, "architecture")
+			if err != nil {
+				mappingUpdateCh <- err
+				return
+			}
+			current.Spec.Expression = "current-expression"
+			_, _, err = mappingStore.Update(testCtx, orgID, current)
+			mappingUpdateCh <- err
+		}()
+		Expect(waitForDatabaseLockWaiters(testCtx, db, 2)).To(Succeed())
+		Expect(revisionLock.Commit().Error).NotTo(HaveOccurred())
+
+		var reconciliation integrationReconciliationResult
+		select {
+		case reconciliation = <-reconciliationCh:
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not finish after the revision contention: %v", testCtx.Err()))
+		}
+		Expect(reconciliation.err).NotTo(HaveOccurred())
+		select {
+		case err = <-mappingUpdateCh:
+			Expect(err).NotTo(HaveOccurred())
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("mapping update did not finish after the revision contention: %v", testCtx.Err()))
+		}
+
+		// If reconciliation won the state-row lock, it may have committed the old
+		// value immediately before the mapping update. A subsequent pass must still
+		// converge; if the update won, the first pass itself exercises the CAS retry.
+		_, err = reconciler.ReconcileDeviceLabels(testCtx, orgID, "mapping-transaction-race")
+		Expect(err).NotTo(HaveOccurred())
+		device, err := mappingStore.GetDevice(testCtx, orgID, "mapping-transaction-race")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
+			"architecture": "current-expression",
+		}))
+	})
+
+	It("When an operator label write contends with reconciliation it should preserve both updates", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		labels := map[string]string{"manual": "before"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "device-transaction-race", nil, nil, &labels)
+
+		// Hold the device row after the reconciler has taken its snapshot. Both the
+		// reconciliation apply and operator mutation must contend on the row.
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		deviceLock := db.WithContext(testCtx).Begin()
+		Expect(deviceLock.Error).NotTo(HaveOccurred())
+		defer deviceLock.Rollback()
+		var lockedDevice model.Device
+		Expect(deviceLock.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("org_id = ? AND name = ?", orgID, "device-transaction-race").
+			Take(&lockedDevice).Error).To(Succeed())
+
+		evaluator := newBlockingLabelSyncEvaluator()
+		events := &recordingLabelSyncEvents{}
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		reconciler, err := labelsyncmappingservice.NewReconciler(reconciliationStore, evaluator, events, log)
+		Expect(err).NotTo(HaveOccurred())
+		defer evaluator.releaseFirstEvaluation()
+
+		reconciliationCh := make(chan integrationReconciliationResult, 1)
+		go func() {
+			result, err := reconciler.ReconcileDeviceLabels(testCtx, orgID, "device-transaction-race")
+			reconciliationCh <- integrationReconciliationResult{result: result, err: err}
+		}()
+		select {
+		case expression := <-evaluator.firstEvaluation:
+			Expect(expression).To(Equal("device.status.systemInfo.architecture"))
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not begin evaluating before timeout: %v", testCtx.Err()))
+		}
+		evaluator.releaseFirstEvaluation()
+
+		operatorUpdateCh := make(chan error, 1)
+		go func() {
+			_, _, _, err := deviceStore.Mutate(testCtx, orgID, "device-transaction-race", nil, func(mutation *devicestore.DeviceMutation) error {
+				updatedLabels := lo.FromPtr(mutation.Device.Metadata.Labels)
+				updatedLabels["manual"] = "operator-update"
+				mutation.Device.Metadata.Labels = &updatedLabels
+				return nil
+			})
+			operatorUpdateCh <- err
+		}()
+		Expect(waitForDatabaseLockWaiters(testCtx, db, 2)).To(Succeed())
+		Expect(deviceLock.Commit().Error).NotTo(HaveOccurred())
+
+		var reconciliation integrationReconciliationResult
+		select {
+		case reconciliation = <-reconciliationCh:
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("reconciler did not finish after the device-row contention: %v", testCtx.Err()))
+		}
+		Expect(reconciliation.err).NotTo(HaveOccurred())
+		select {
+		case err = <-operatorUpdateCh:
+			Expect(err).NotTo(HaveOccurred())
+		case <-testCtx.Done():
+			Fail(fmt.Sprintf("operator update did not finish after the device-row contention: %v", testCtx.Err()))
+		}
+
+		device, err := mappingStore.GetDevice(testCtx, orgID, "device-transaction-race")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
+			"architecture": "device.status.systemInfo.architecture",
+			"manual":       "operator-update",
+		}))
+		var managedLabel, manualLabel model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "device-transaction-race", "architecture").Take(&managedLabel).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "device-transaction-race", "manual").Take(&manualLabel).Error).To(Succeed())
+		Expect(managedLabel.LabelSyncMappingID).NotTo(BeNil())
+		Expect(manualLabel.LabelSyncMappingID).To(BeNil())
+	})
+
+	It("When reconciliation overlaps on label keys across devices it should commit every device without deadlock", func() {
+		mappingResource := newLabelSyncMapping("multi-output", "")
+		mappingResource.Spec.Key = nil
+		_, err := mappingStore.Create(ctx, orgID, mappingResource)
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "multi-output").Take(&storedMapping).Error).To(Succeed())
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+
+		const sharedKeyCount = 12
+		deviceNames := []string{"overlap-device-a", "overlap-device-b", "overlap-device-c", "overlap-device-d"}
+		type reconciliationWrite struct {
+			deviceName string
+			snapshot   labelsyncmappingstore.DeviceLabelReconciliationSnapshot
+			desired    map[string]labelsyncmappingstore.DesiredDeviceLabel
+		}
+		writes := make([]reconciliationWrite, 0, len(deviceNames))
+		for deviceIndex, deviceName := range deviceNames {
+			labels := map[string]string{"manual": "preserved"}
+			testutil.CreateTestDevice(ctx, deviceStore, orgID, deviceName, nil, nil, &labels)
+			snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, deviceName)
+			Expect(err).NotTo(HaveOccurred())
+			desired := map[string]labelsyncmappingstore.DesiredDeviceLabel{
+				"manual": {Value: "preserved"},
+			}
+			for keyIndex := 0; keyIndex < sharedKeyCount; keyIndex++ {
+				key := fmt.Sprintf("shared-%02d", keyIndex)
+				desired[key] = labelsyncmappingstore.DesiredDeviceLabel{
+					Value:     fmt.Sprintf("device-%d-value-%d", deviceIndex, keyIndex),
+					MappingID: &storedMapping.ID,
+				}
+			}
+			uniqueKey := fmt.Sprintf("unique-%d", deviceIndex)
+			desired[uniqueKey] = labelsyncmappingstore.DesiredDeviceLabel{
+				Value:     fmt.Sprintf("value-%d", deviceIndex),
+				MappingID: &storedMapping.ID,
+			}
+			writes = append(writes, reconciliationWrite{deviceName: deviceName, snapshot: snapshot, desired: desired})
+		}
+
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		start := make(chan struct{})
+		type reconciliationWriteResult struct {
+			deviceName string
+			write      labelsyncmappingstore.DeviceLabelWriteResult
+			err        error
+		}
+		results := make(chan reconciliationWriteResult, len(writes))
+		for _, write := range writes {
+			go func(write reconciliationWrite) {
+				<-start
+				result, err := reconciliationStore.ApplyDeviceLabelReconciliation(testCtx, orgID, write.deviceName, write.snapshot, write.desired)
+				results <- reconciliationWriteResult{deviceName: write.deviceName, write: result, err: err}
+			}(write)
+		}
+		close(start)
+
+		for range writes {
+			select {
+			case result := <-results:
+				Expect(result.err).NotTo(HaveOccurred(), "device %s", result.deviceName)
+				Expect(result.write).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
+			case <-testCtx.Done():
+				Fail(fmt.Sprintf("overlapping reconciliations did not all complete: %v", testCtx.Err()))
+			}
+		}
+
+		for deviceIndex, deviceName := range deviceNames {
+			device, err := mappingStore.GetDevice(ctx, orgID, deviceName)
+			Expect(err).NotTo(HaveOccurred())
+			labels := map[string]string{"manual": "preserved"}
+			for keyIndex := 0; keyIndex < sharedKeyCount; keyIndex++ {
+				labels[fmt.Sprintf("shared-%02d", keyIndex)] = fmt.Sprintf("device-%d-value-%d", deviceIndex, keyIndex)
+			}
+			uniqueKey := fmt.Sprintf("unique-%d", deviceIndex)
+			labels[uniqueKey] = fmt.Sprintf("value-%d", deviceIndex)
+			Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(labels))
+
+			var deviceLabels []model.DeviceLabel
+			Expect(db.Where("org_id = ? AND device_name = ?", orgID, deviceName).Find(&deviceLabels).Error).To(Succeed())
+			type persistedLabel struct {
+				value string
+				owner *uuid.UUID
+			}
+			persisted := make(map[string]persistedLabel, len(deviceLabels))
+			for _, label := range deviceLabels {
+				persisted[label.LabelKey] = persistedLabel{value: label.LabelValue, owner: label.LabelSyncMappingID}
+			}
+			expected := make(map[string]persistedLabel, len(labels))
+			for key, value := range labels {
+				var owner *uuid.UUID
+				if key != "manual" {
+					owner = &storedMapping.ID
+				}
+				expected[key] = persistedLabel{value: value, owner: owner}
+			}
+			Expect(persisted).To(Equal(expected))
+		}
+	})
 })
 
 func newLabelSyncMapping(name, key string) *api.LabelSyncMapping {
@@ -537,5 +944,91 @@ func newLabelSyncMapping(name, key string) *api.LabelSyncMapping {
 			Key:          lo.ToPtr(key),
 			Expression:   "device.status.systemInfo.architecture",
 		},
+	}
+}
+
+type integrationReconciliationResult struct {
+	result labelsyncmappingservice.ReconciliationResult
+	err    error
+}
+
+type blockingLabelSyncEvaluator struct {
+	mu              sync.Mutex
+	expressions     []string
+	firstEvaluation chan string
+	release         chan struct{}
+	releaseOnce     sync.Once
+}
+
+func newBlockingLabelSyncEvaluator() *blockingLabelSyncEvaluator {
+	return &blockingLabelSyncEvaluator{
+		firstEvaluation: make(chan string, 1),
+		release:         make(chan struct{}),
+	}
+}
+
+func (e *blockingLabelSyncEvaluator) Evaluate(expression string, _ labelsyncmappingservice.Activation) (labelsyncmappingservice.Result, error) {
+	e.mu.Lock()
+	first := len(e.expressions) == 0
+	e.expressions = append(e.expressions, expression)
+	e.mu.Unlock()
+	if first {
+		e.firstEvaluation <- expression
+		<-e.release
+	}
+	return labelsyncmappingservice.ScalarResult(expression), nil
+}
+
+func (*blockingLabelSyncEvaluator) ValidateExpressionIs(string, labelsyncmappingservice.ResultKind) error {
+	return nil
+}
+
+func (e *blockingLabelSyncEvaluator) releaseFirstEvaluation() {
+	e.releaseOnce.Do(func() { close(e.release) })
+}
+
+func (e *blockingLabelSyncEvaluator) evaluatedExpressions() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.expressions...)
+}
+
+type recordingLabelSyncEvents struct {
+	mu      sync.Mutex
+	created []*domain.Event
+}
+
+func (e *recordingLabelSyncEvents) CreateEvent(_ context.Context, _ uuid.UUID, event *domain.Event) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.created = append(e.created, event)
+}
+
+func (*recordingLabelSyncEvents) HandleGenericResourceDeletedEvents(context.Context, domain.ResourceKind, uuid.UUID, string, interface{}, interface{}, bool, error) {
+}
+
+func (e *recordingLabelSyncEvents) snapshot() []*domain.Event {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]*domain.Event(nil), e.created...)
+}
+
+func waitForDatabaseLockWaiters(ctx context.Context, db *gorm.DB, minimum int64) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting int64
+		if err := db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting).Error; err != nil {
+			return err
+		}
+		if waiting >= minimum {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for %d database lock waiters (observed %d): %w", minimum, waiting, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
