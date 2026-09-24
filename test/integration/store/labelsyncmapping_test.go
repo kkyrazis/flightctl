@@ -283,6 +283,75 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(updated).To(BeFalse())
 	})
+
+	It("When a device reconciliation snapshot is loaded it should include current labels, mapping identities, terminating mappings, and revision", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("model", "model"))
+		Expect(err).NotTo(HaveOccurred())
+
+		var architectureMapping, modelMapping model.LabelSyncMapping
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "architecture").Take(&architectureMapping).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "model").Take(&modelMapping).Error).To(Succeed())
+
+		labels := map[string]string{
+			"architecture": "x86_64",
+			"manual":       "preserved",
+			"model":        "edge",
+		}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "snapshot-device", nil, nil, &labels)
+		Expect(db.Model(&model.DeviceLabel{}).
+			Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "snapshot-device", "architecture").
+			Update("label_sync_mapping_id", architectureMapping.ID).Error).To(Succeed())
+		Expect(db.Model(&model.DeviceLabel{}).
+			Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "snapshot-device", "model").
+			Update("label_sync_mapping_id", modelMapping.ID).Error).To(Succeed())
+
+		deleted, err := mappingStore.Delete(ctx, orgID, "model")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+
+		snapshotStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationSnapshotStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := snapshotStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "snapshot-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snapshot.Device.Metadata.Name).To(Equal(lo.ToPtr("snapshot-device")))
+		Expect(snapshot.Device.Metadata.ResourceVersion).NotTo(BeNil())
+		Expect(lo.FromPtr(snapshot.Device.Metadata.Labels)).To(Equal(labels))
+		Expect(snapshot.MappingRevision).To(Equal(int64(3)))
+
+		deviceLabels := make(map[string]labelsyncmappingstore.DeviceLabelOwnership, len(snapshot.DeviceLabels))
+		for _, label := range snapshot.DeviceLabels {
+			deviceLabels[label.Key] = label
+		}
+		Expect(deviceLabels).To(HaveLen(3))
+		Expect(deviceLabels["architecture"]).To(Equal(labelsyncmappingstore.DeviceLabelOwnership{
+			Key: "architecture", Value: "x86_64", MappingID: &architectureMapping.ID,
+		}))
+		Expect(deviceLabels["manual"]).To(Equal(labelsyncmappingstore.DeviceLabelOwnership{
+			Key: "manual", Value: "preserved", MappingID: nil,
+		}))
+		Expect(deviceLabels["model"]).To(Equal(labelsyncmappingstore.DeviceLabelOwnership{
+			Key: "model", Value: "edge", MappingID: &modelMapping.ID,
+		}))
+
+		mappings := make(map[string]labelsyncmappingstore.ReconciliationMapping, len(snapshot.Mappings))
+		for _, mapping := range snapshot.Mappings {
+			mappings[lo.FromPtr(mapping.Mapping.Metadata.Name)] = mapping
+		}
+		Expect(mappings).To(HaveLen(2))
+		Expect(mappings["architecture"].ID).To(Equal(architectureMapping.ID))
+		Expect(mappings["architecture"].Mapping.Metadata.DeletionTimestamp).To(BeNil())
+		Expect(mappings["model"].ID).To(Equal(modelMapping.ID))
+		Expect(mappings["model"].Mapping.Metadata.DeletionTimestamp).NotTo(BeNil())
+	})
+
+	It("When a device is absent it should fail to load a reconciliation snapshot", func() {
+		snapshotStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationSnapshotStore)
+		Expect(ok).To(BeTrue())
+		_, err := snapshotStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "missing-device")
+		Expect(err).To(MatchError(flterrors.ErrResourceNotFound))
+	})
 })
 
 func newLabelSyncMapping(name, key string) *api.LabelSyncMapping {
