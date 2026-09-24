@@ -352,6 +352,179 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		_, err := snapshotStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "missing-device")
 		Expect(err).To(MatchError(flterrors.ErrResourceNotFound))
 	})
+
+	It("When reconciled values change it should update device labels and mapping ownership atomically", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&storedMapping).Error).To(Succeed())
+		mappingID := storedMapping.ID
+
+		labels := map[string]string{"architecture": "x86_64", "manual": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "apply-device", nil, nil, &labels)
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "apply-device")
+		Expect(err).NotTo(HaveOccurred())
+		resourceVersion, err := strconv.ParseInt(lo.FromPtr(snapshot.Device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+
+		result, err := reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "apply-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"architecture": {Value: "aarch64", MappingID: &mappingID},
+			"manual":       {Value: "preserved"},
+		})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
+		device, err := mappingStore.GetDevice(ctx, orgID, "apply-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{"architecture": "aarch64", "manual": "preserved"}))
+		updatedResourceVersion, err := strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updatedResourceVersion).To(Equal(resourceVersion + 1))
+
+		var managedLabel, manualLabel model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "apply-device", "architecture").Take(&managedLabel).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "apply-device", "manual").Take(&manualLabel).Error).To(Succeed())
+		Expect(managedLabel.LabelValue).To(Equal("aarch64"))
+		Expect(managedLabel.LabelSyncMappingID).To(Equal(&mappingID))
+		Expect(manualLabel.LabelValue).To(Equal("preserved"))
+		Expect(manualLabel.LabelSyncMappingID).To(BeNil())
+	})
+
+	It("When owner stamping fails it should roll back the label value update", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		labels := map[string]string{"architecture": "x86_64"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "rollback-device", nil, nil, &labels)
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "rollback-device")
+		Expect(err).NotTo(HaveOccurred())
+		invalidMappingID := uuid.New()
+
+		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "rollback-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"architecture": {Value: "aarch64", MappingID: &invalidMappingID},
+		})
+		Expect(err).To(HaveOccurred())
+
+		device, err := mappingStore.GetDevice(ctx, orgID, "rollback-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(labels))
+		var label model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "rollback-device", "architecture").Take(&label).Error).To(Succeed())
+		Expect(label.LabelValue).To(Equal("x86_64"))
+		Expect(label.LabelSyncMappingID).To(BeNil())
+	})
+
+	It("When only label ownership changes it should avoid updating device labels and remain idempotent", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&storedMapping).Error).To(Succeed())
+		mappingID := storedMapping.ID
+
+		labels := map[string]string{"architecture": "x86_64", "manual": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "owner-only-device", nil, nil, &labels)
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "owner-only-device")
+		Expect(err).NotTo(HaveOccurred())
+		staleSnapshot := snapshot
+		resourceVersion, err := strconv.ParseInt(lo.FromPtr(snapshot.Device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		desired := map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"architecture": {Value: "x86_64", MappingID: &mappingID},
+			"manual":       {Value: "preserved"},
+		}
+
+		result, err := reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "owner-only-device", snapshot, desired)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{OwnershipChanged: true}))
+		device, err := mappingStore.GetDevice(ctx, orgID, "owner-only-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(device.Metadata.ResourceVersion)).To(Equal(strconv.FormatInt(resourceVersion, 10)))
+
+		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "owner-only-device", staleSnapshot, desired)
+		Expect(err).To(MatchError(labelsyncmappingstore.ErrDeviceLabelReconciliationConflict))
+
+		snapshot, err = reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "owner-only-device")
+		Expect(err).NotTo(HaveOccurred())
+		result, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "owner-only-device", snapshot, desired)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{}))
+	})
+
+	It("When the device resource version changes it should reject a stale reconciliation write", func() {
+		labels := map[string]string{"manual": "before"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "stale-device", nil, nil, &labels)
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "stale-device")
+		Expect(err).NotTo(HaveOccurred())
+		resourceVersion, err := strconv.ParseInt(lo.FromPtr(snapshot.Device.Metadata.ResourceVersion), 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		updated, err := mappingStore.UpdateDeviceLabels(ctx, orgID, "stale-device", resourceVersion, snapshot.MappingRevision, map[string]string{"manual": "operator-update"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "stale-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"manual": {Value: "before"},
+		})
+		Expect(err).To(MatchError(labelsyncmappingstore.ErrDeviceLabelReconciliationConflict))
+	})
+
+	It("When the mapping revision changes it should reject a stale reconciliation write", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		labels := map[string]string{"manual": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "stale-revision-device", nil, nil, &labels)
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "stale-revision-device")
+		Expect(err).NotTo(HaveOccurred())
+		mapping, err := mappingStore.Get(ctx, orgID, "architecture")
+		Expect(err).NotTo(HaveOccurred())
+		mapping.Spec.Expression = "status.systemInfo.architecture + '-v2'"
+		_, _, err = mappingStore.Update(ctx, orgID, mapping)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "stale-revision-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"manual": {Value: "preserved"},
+		})
+		Expect(err).To(MatchError(labelsyncmappingstore.ErrDeviceLabelReconciliationConflict))
+	})
+
+	It("When a terminating mapping has no desired output it should clean owned labels before finalization", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		var storedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&storedMapping).Error).To(Succeed())
+		mappingID := storedMapping.ID
+
+		labels := map[string]string{"architecture": "x86_64", "manual": "preserved"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "terminating-device", nil, nil, &labels)
+		Expect(db.Model(&model.DeviceLabel{}).
+			Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "terminating-device", "architecture").
+			Update("label_sync_mapping_id", mappingID).Error).To(Succeed())
+		deleted, err := mappingStore.Delete(ctx, orgID, "architecture")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+
+		reconciliationStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "terminating-device")
+		Expect(err).NotTo(HaveOccurred())
+		result, err := reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "terminating-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
+			"manual": {Value: "preserved"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
+		finalized, err := mappingStore.FinalizeDelete(ctx, orgID, "architecture")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(finalized).To(BeTrue())
+	})
 })
 
 func newLabelSyncMapping(name, key string) *api.LabelSyncMapping {
