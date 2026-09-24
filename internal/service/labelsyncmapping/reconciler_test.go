@@ -8,11 +8,16 @@ import (
 	"time"
 
 	"github.com/flightctl/flightctl/internal/domain"
+	transactionstore "github.com/flightctl/flightctl/internal/store"
 	labelsyncmappingstore "github.com/flightctl/flightctl/internal/store/labelsyncmapping"
 	"github.com/google/uuid"
 	"github.com/samber/lo"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type reconciliationResponse struct {
@@ -43,6 +48,30 @@ type reconcilerStore struct {
 	writeResult   labelsyncmappingstore.DeviceLabelWriteResult
 	appliedLabels []map[string]labelsyncmappingstore.DesiredDeviceLabel
 	onApply       func()
+}
+
+type reconciliationEventService struct {
+	created []*domain.Event
+}
+
+func (s *reconciliationEventService) CreateEvent(_ context.Context, _ uuid.UUID, event *domain.Event) {
+	s.created = append(s.created, event)
+}
+
+func (*reconciliationEventService) HandleGenericResourceDeletedEvents(context.Context, domain.ResourceKind, uuid.UUID, string, interface{}, interface{}, bool, error) {
+}
+
+func newTestReconciler(t *testing.T, store *reconcilerStore, evaluator Evaluator, eventServices ...*reconciliationEventService) *Reconciler {
+	t.Helper()
+	var events *reconciliationEventService
+	if len(eventServices) > 0 {
+		events = eventServices[0]
+	} else {
+		events = &reconciliationEventService{}
+	}
+	reconciler, err := NewReconciler(store, evaluator, events, logrus.New())
+	require.NoError(t, err)
+	return reconciler
 }
 
 func (s *reconcilerStore) LoadDeviceLabelReconciliationSnapshot(context.Context, uuid.UUID, string) (labelsyncmappingstore.DeviceLabelReconciliationSnapshot, error) {
@@ -131,7 +160,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"custom-info":  {result: MapResult{"custominfo/site": "east-coast", "model": "edge"}},
 		}}
 
-		result, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.True(t, result.LabelsChanged)
@@ -167,7 +196,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"map":    {result: MapResult{"site": "east"}},
 		}}
 
-		_, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		_, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.Equal(t, map[string]labelsyncmappingstore.DesiredDeviceLabel{
@@ -193,7 +222,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"valid-scalar": {result: ScalarResult("new")},
 		}}
 
-		result, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.Equal(t, map[string]labelsyncmappingstore.DesiredDeviceLabel{
@@ -221,7 +250,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"map-scalar": {result: ScalarResult("invalid")},
 		}}
 
-		result, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.Equal(t, map[string]labelsyncmappingstore.DesiredDeviceLabel{
@@ -252,7 +281,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"independent": {result: ScalarResult("independent-value")},
 		}}
 
-		result, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.Equal(t, map[string]labelsyncmappingstore.DesiredDeviceLabel{
@@ -280,7 +309,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 			"map": {result: MapResult{"manual": "must-not-take", "reserved": "must-not-overwrite", "safe": "applied"}},
 		}}
 
-		result, err := NewReconciler(state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		assert.Equal(t, map[string]labelsyncmappingstore.DesiredDeviceLabel{
@@ -320,7 +349,7 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 		responses["empty"] = reconciliationResponse{result: MapResult{}}
 		state := &reconcilerStore{snapshot: reconciliationSnapshot(labels, owners, mappings...)}
 
-		result, err := NewReconciler(state, &fakeEvaluator{responses: responses}).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, &fakeEvaluator{responses: responses}).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
 		require.NoError(t, err)
 		require.Len(t, result.MappingOutcomes, 4)
@@ -339,11 +368,144 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 		}
 	})
 
+	t.Run("When applying detects a stale snapshot it should reload and retry the complete reconciliation", func(t *testing.T) {
+		mappingID := reconciliationTestID("000000000071")
+		state := &reconcilerStore{
+			snapshot:    reconciliationSnapshot(nil, nil, reconciliationMapping(mappingID, "architecture", lo.ToPtr("architecture"), "architecture", false)),
+			applyErrors: []error{labelsyncmappingstore.ErrDeviceLabelReconciliationConflict},
+			writeResult: labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true},
+		}
+		evaluator := &fakeEvaluator{responses: map[string]reconciliationResponse{
+			"architecture": {result: ScalarResult("aarch64")},
+		}}
+		events := &reconciliationEventService{}
+
+		result, err := newTestReconciler(t, state, evaluator, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+
+		require.NoError(t, err)
+		assert.True(t, result.LabelsChanged)
+		assert.Equal(t, 2, state.loadCalls)
+		assert.Equal(t, 2, state.applyCalls)
+		assert.Len(t, evaluator.activations, 2)
+		assertLabelsUpdatedEvent(t, events, "edge-01")
+	})
+
+	t.Run("When every apply attempt conflicts it should stop after five complete attempts", func(t *testing.T) {
+		const expectedAttempts = 5
+		mappingID := reconciliationTestID("000000000072")
+		conflicts := make([]error, expectedAttempts)
+		for index := range conflicts {
+			conflicts[index] = labelsyncmappingstore.ErrDeviceLabelReconciliationConflict
+		}
+		state := &reconcilerStore{
+			snapshot:    reconciliationSnapshot(nil, nil, reconciliationMapping(mappingID, "architecture", lo.ToPtr("architecture"), "architecture", false)),
+			applyErrors: conflicts,
+		}
+		evaluator := &fakeEvaluator{responses: map[string]reconciliationResponse{
+			"architecture": {result: ScalarResult("aarch64")},
+		}}
+		events := &reconciliationEventService{}
+
+		_, err := newTestReconciler(t, state, evaluator, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+
+		require.ErrorIs(t, err, labelsyncmappingstore.ErrDeviceLabelReconciliationConflict)
+		assert.Equal(t, expectedAttempts, state.loadCalls)
+		assert.Equal(t, expectedAttempts, state.applyCalls)
+		assert.Len(t, evaluator.activations, expectedAttempts)
+		assert.Empty(t, events.created)
+	})
+
+	t.Run("When applying fails for a reason other than a stale snapshot it should not retry", func(t *testing.T) {
+		writeErr := errors.New("database unavailable")
+		state := &reconcilerStore{
+			snapshot:    reconciliationSnapshot(nil, nil),
+			applyErrors: []error{writeErr},
+		}
+		events := &reconciliationEventService{}
+
+		_, err := newTestReconciler(t, state, &fakeEvaluator{}, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+
+		require.ErrorIs(t, err, writeErr)
+		assert.Equal(t, 1, state.loadCalls)
+		assert.Equal(t, 1, state.applyCalls)
+		assert.Empty(t, events.created)
+	})
+
+	t.Run("When the context is canceled after a conflict it should stop before retrying", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		state := &reconcilerStore{
+			snapshot:    reconciliationSnapshot(nil, nil),
+			applyErrors: []error{labelsyncmappingstore.ErrDeviceLabelReconciliationConflict},
+			onApply:     cancel,
+		}
+		events := &reconciliationEventService{}
+
+		_, err := newTestReconciler(t, state, &fakeEvaluator{}, events).ReconcileDeviceLabels(ctx, orgID, "edge-01")
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 1, state.loadCalls)
+		assert.Equal(t, 1, state.applyCalls)
+		assert.Empty(t, events.created)
+	})
+
+	t.Run("When called inside a store transaction it should not apply labels or publish an event", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Silent),
+		})
+		require.NoError(t, err)
+
+		state := &reconcilerStore{snapshot: reconciliationSnapshot(nil, nil)}
+		events := &reconciliationEventService{}
+		reconciler := newTestReconciler(t, state, &fakeEvaluator{}, events)
+		rollbackErr := errors.New("rollback caller transaction")
+		var reconciliationErr error
+
+		err = transactionstore.WithTransaction(context.Background(), db, func(txCtx context.Context) error {
+			_, reconciliationErr = reconciler.ReconcileDeviceLabels(txCtx, orgID, "edge-01")
+			return rollbackErr
+		})
+
+		require.ErrorIs(t, err, rollbackErr)
+		require.ErrorContains(t, reconciliationErr, "cannot run inside an existing store transaction")
+		assert.Zero(t, state.loadCalls)
+		assert.Zero(t, state.applyCalls)
+		assert.Empty(t, events.created)
+	})
+
+	t.Run("When labels are unchanged or only ownership changes it should not emit an update event", func(t *testing.T) {
+		for _, writeResult := range []labelsyncmappingstore.DeviceLabelWriteResult{
+			{},
+			{OwnershipChanged: true},
+		} {
+			state := &reconcilerStore{snapshot: reconciliationSnapshot(nil, nil), writeResult: writeResult}
+			events := &reconciliationEventService{}
+
+			result, err := newTestReconciler(t, state, &fakeEvaluator{}, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+
+			require.NoError(t, err)
+			assert.False(t, result.LabelsChanged)
+			assert.Empty(t, events.created)
+		}
+	})
+
 	t.Run("When loading the snapshot fails it should return a device-level error", func(t *testing.T) {
 		state := &reconcilerStore{loadErr: errors.New("store unavailable")}
-		result, err := NewReconciler(state, &fakeEvaluator{}).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, &fakeEvaluator{}).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 		require.ErrorContains(t, err, "store unavailable")
 		assert.Empty(t, result.MappingOutcomes)
 		assert.Equal(t, 0, state.applyCalls)
 	})
+}
+
+func assertLabelsUpdatedEvent(t *testing.T, events *reconciliationEventService, deviceName string) {
+	t.Helper()
+	require.Len(t, events.created, 1)
+	event := events.created[0]
+	require.Equal(t, domain.EventReasonResourceUpdated, event.Reason)
+	require.Equal(t, domain.DeviceKind, event.InvolvedObject.Kind)
+	require.Equal(t, deviceName, event.InvolvedObject.Name)
+	require.NotNil(t, event.Details)
+	details, err := event.Details.AsResourceUpdatedDetails()
+	require.NoError(t, err)
+	require.Equal(t, []domain.ResourceUpdatedDetailsUpdatedFields{domain.Labels}, details.UpdatedFields)
 }
