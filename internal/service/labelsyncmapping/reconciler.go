@@ -133,9 +133,6 @@ func (r *Reconciler) RecordFailures(ctx context.Context, orgID uuid.UUID, outcom
 }
 
 func (r *Reconciler) ListMappingScanTargets(ctx context.Context, orgID uuid.UUID) ([]MappingScanToken, error) {
-	if r == nil || r.store == nil {
-		return nil, errors.New("label-sync reconciler is not configured")
-	}
 	records, err := r.store.ListMappingScanTargets(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -148,9 +145,6 @@ func (r *Reconciler) ListMappingScanTargets(ctx context.Context, orgID uuid.UUID
 }
 
 func (r *Reconciler) RecordMappingScanFailure(ctx context.Context, orgID uuid.UUID, outcome MappingOutcome) (MappingScanToken, bool, error) {
-	if r == nil || r.store == nil {
-		return MappingScanToken{}, false, errors.New("label-sync reconciler is not configured")
-	}
 	if outcome.Err == nil {
 		return MappingScanToken{}, false, nil
 	}
@@ -167,9 +161,6 @@ func (r *Reconciler) RecordMappingScanFailure(ctx context.Context, orgID uuid.UU
 }
 
 func (r *Reconciler) CompleteMappingScan(ctx context.Context, orgID uuid.UUID, tokens []MappingScanToken) (map[uuid.UUID]bool, error) {
-	if r == nil || r.store == nil {
-		return nil, errors.New("label-sync reconciler is not configured")
-	}
 	records := make([]labelsyncmapping.MappingScanRecord, len(tokens))
 	for i, token := range tokens {
 		records[i] = labelsyncmapping.MappingScanRecord{

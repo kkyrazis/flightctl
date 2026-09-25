@@ -173,7 +173,7 @@ func (s *labelSyncMappingStore) ListMappingScanTargets(ctx context.Context, orgI
 
 	targets := make([]MappingScanRecord, 0, len(mappings))
 	for _, mapping := range mappings {
-		if mapping.Spec == nil || mapping.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingNeedsScan(mapping) {
+		if mapping.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingNeedsScan(mapping) {
 			continue
 		}
 		targets = append(targets, MappingScanRecord{
@@ -228,14 +228,14 @@ func (s *labelSyncMappingStore) CompleteMappingScan(ctx context.Context, orgID u
 
 			var current model.LabelSyncMapping
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("org_id = ? AND id = ?", orgID, target.MappingID).Take(&current).Error
+				Where("org_id = ? AND id = ? AND spec IS NOT NULL", orgID, target.MappingID).Take(&current).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				continue
 			}
 			if err != nil {
 				return store.ErrorFromGormError(err)
 			}
-			if current.Spec == nil || current.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingMatchesScanToken(current, target) {
+			if current.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingMatchesScanToken(current, target) {
 				continue
 			}
 
