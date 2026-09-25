@@ -25,8 +25,9 @@ type DeviceLabelOwnership struct {
 }
 
 type ReconciliationMapping struct {
-	ID      uuid.UUID
-	Mapping domain.LabelSyncMapping
+	ID               uuid.UUID
+	DeletionRevision *int64
+	Mapping          domain.LabelSyncMapping
 }
 
 type DeviceLabelReconciliationSnapshot struct {
@@ -80,7 +81,15 @@ func (s *labelSyncMappingStore) LoadDeviceLabelReconciliationSnapshot(ctx contex
 			if err != nil {
 				return err
 			}
-			snapshot.Mappings[i] = ReconciliationMapping{ID: mapping.ID, Mapping: *resource}
+			var deletionRevision *int64
+			if mapping.DeletionRevision != nil {
+				deletionRevision = lo.ToPtr(*mapping.DeletionRevision)
+			}
+			snapshot.Mappings[i] = ReconciliationMapping{
+				ID:               mapping.ID,
+				DeletionRevision: deletionRevision,
+				Mapping:          *resource,
+			}
 		}
 
 		var state model.LabelSyncState
@@ -154,6 +163,60 @@ func (s *labelSyncMappingStore) ApplyDeviceLabelReconciliation(ctx context.Conte
 		return DeviceLabelWriteResult{}, err
 	}
 	return writeResult, nil
+}
+
+func (s *labelSyncMappingStore) RecordReconciliationFailure(ctx context.Context, orgID uuid.UUID, failure ReconciliationFailure) (bool, error) {
+	updated := false
+	err := store.RunInTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("org_id = ? AND id = ? AND generation = ?", orgID, failure.MappingID, failure.Generation)
+		if failure.DeletionRevision == nil {
+			query = query.Where("deletion_revision IS NULL")
+		} else {
+			query = query.Where("deletion_revision = ?", *failure.DeletionRevision)
+		}
+
+		var current model.LabelSyncMapping
+		if err := query.Take(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return store.ErrorFromGormError(err)
+		}
+
+		status := domain.LabelSyncMappingStatus{Conditions: &[]domain.Condition{}}
+		if current.Status != nil {
+			status = current.Status.Data
+			if status.Conditions == nil {
+				status.Conditions = &[]domain.Condition{}
+			}
+		}
+		domain.SetStatusCondition(status.Conditions, domain.Condition{
+			Type:               domain.ConditionType("Ready"),
+			Status:             domain.ConditionStatusFalse,
+			Reason:             "Degraded",
+			Message:            failure.Message,
+			ObservedGeneration: lo.ToPtr(failure.Generation),
+		})
+
+		write := tx.Model(&model.LabelSyncMapping{}).
+			Where("org_id = ? AND id = ? AND generation = ?", orgID, failure.MappingID, failure.Generation)
+		if failure.DeletionRevision == nil {
+			write = write.Where("deletion_revision IS NULL")
+		} else {
+			write = write.Where("deletion_revision = ?", *failure.DeletionRevision)
+		}
+		result := write.Updates(map[string]interface{}{
+			"status":           model.MakeJSONField(status),
+			"failure_revision": gorm.Expr("failure_revision + 1"),
+		})
+		if result.Error != nil {
+			return store.ErrorFromGormError(result.Error)
+		}
+		updated = result.RowsAffected == 1
+		return nil
+	})
+	return updated, err
 }
 
 func reconciliationKeys(snapshot DeviceLabelReconciliationSnapshot, desired map[string]DesiredDeviceLabel) []string {

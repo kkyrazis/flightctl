@@ -40,14 +40,16 @@ func (*fakeEvaluator) ValidateExpressionIs(string, ResultKind) error { return ni
 
 type reconcilerStore struct {
 	labelsyncmappingstore.Store
-	snapshot      labelsyncmappingstore.DeviceLabelReconciliationSnapshot
-	loadErr       error
-	loadCalls     int
-	applyCalls    int
-	applyErrors   []error
-	writeResult   labelsyncmappingstore.DeviceLabelWriteResult
-	appliedLabels []map[string]labelsyncmappingstore.DesiredDeviceLabel
-	onApply       func()
+	snapshot         labelsyncmappingstore.DeviceLabelReconciliationSnapshot
+	loadErr          error
+	loadCalls        int
+	applyCalls       int
+	applyErrors      []error
+	writeResult      labelsyncmappingstore.DeviceLabelWriteResult
+	appliedLabels    []map[string]labelsyncmappingstore.DesiredDeviceLabel
+	recordedFailures []labelsyncmappingstore.ReconciliationFailure
+	recordFailureErr error
+	onApply          func()
 }
 
 type reconciliationEventService struct {
@@ -92,6 +94,11 @@ func (s *reconcilerStore) ApplyDeviceLabelReconciliation(_ context.Context, _ uu
 	return s.writeResult, nil
 }
 
+func (s *reconcilerStore) RecordReconciliationFailure(_ context.Context, _ uuid.UUID, failure labelsyncmappingstore.ReconciliationFailure) (bool, error) {
+	s.recordedFailures = append(s.recordedFailures, failure)
+	return true, s.recordFailureErr
+}
+
 func cloneDesiredLabels(labels map[string]labelsyncmappingstore.DesiredDeviceLabel) map[string]labelsyncmappingstore.DesiredDeviceLabel {
 	clone := make(map[string]labelsyncmappingstore.DesiredDeviceLabel, len(labels))
 	for key, label := range labels {
@@ -113,6 +120,7 @@ func reconciliationMapping(id uuid.UUID, name string, key *string, expression st
 		deletionTimestamp := time.Unix(1, 0).UTC()
 		mapping.Metadata.DeletionTimestamp = &deletionTimestamp
 	}
+	mapping.Metadata.Generation = lo.ToPtr(int64(1))
 	return labelsyncmappingstore.ReconciliationMapping{ID: id, Mapping: mapping}
 }
 
@@ -489,6 +497,63 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 		require.ErrorContains(t, err, "store unavailable")
 		assert.Empty(t, result.MappingOutcomes)
 		assert.Equal(t, 0, state.applyCalls)
+	})
+
+	t.Run("When one mapping fails it should record only that mapping with its captured token", func(t *testing.T) {
+		failedMappingID := reconciliationTestID("000000000081")
+		healthyMappingID := reconciliationTestID("000000000082")
+		failedMapping := reconciliationMapping(failedMappingID, "failing", lo.ToPtr("failing"), "failing", false)
+		failedMapping.Mapping.Metadata.Generation = lo.ToPtr(int64(4))
+		failedMapping.DeletionRevision = lo.ToPtr(int64(11))
+		healthyMapping := reconciliationMapping(healthyMappingID, "healthy", lo.ToPtr("healthy"), "healthy", false)
+		state := &reconcilerStore{snapshot: reconciliationSnapshot(nil, nil, failedMapping, healthyMapping)}
+		evaluator := &fakeEvaluator{responses: map[string]reconciliationResponse{
+			"failing": {err: errors.New("evaluation failed")},
+			"healthy": {result: ScalarResult("value")},
+		}}
+		reconciler := newTestReconciler(t, state, evaluator)
+
+		result, err := reconciler.ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		require.NoError(t, err)
+		require.Len(t, result.MappingOutcomes, 2)
+		require.Error(t, result.MappingOutcomes[0].Err)
+		assert.Equal(t, failedMappingID, result.MappingOutcomes[0].MappingID)
+		assert.EqualValues(t, 4, result.MappingOutcomes[0].Generation)
+		assert.Equal(t, lo.ToPtr(int64(11)), result.MappingOutcomes[0].DeletionRevision)
+		assert.NoError(t, result.MappingOutcomes[1].Err)
+
+		require.NoError(t, reconciler.RecordFailures(context.Background(), orgID, result.MappingOutcomes))
+		require.Len(t, state.recordedFailures, 1)
+		assert.Equal(t, failedMappingID, state.recordedFailures[0].MappingID)
+		assert.EqualValues(t, 4, state.recordedFailures[0].Generation)
+		assert.Equal(t, lo.ToPtr(int64(11)), state.recordedFailures[0].DeletionRevision)
+		assert.Contains(t, state.recordedFailures[0].Message, "evaluation failed")
+	})
+
+	t.Run("When applying labels fails it should return failures for every captured mapping", func(t *testing.T) {
+		firstID := reconciliationTestID("000000000083")
+		secondID := reconciliationTestID("000000000084")
+		writeErr := errors.New("label write failed")
+		state := &reconcilerStore{
+			snapshot: reconciliationSnapshot(nil, nil,
+				reconciliationMapping(firstID, "first", lo.ToPtr("first"), "first", false),
+				reconciliationMapping(secondID, "second", lo.ToPtr("second"), "second", false),
+			),
+			applyErrors: []error{writeErr},
+		}
+		evaluator := &fakeEvaluator{responses: map[string]reconciliationResponse{
+			"first":  {result: ScalarResult("one")},
+			"second": {result: ScalarResult("two")},
+		}}
+
+		result, err := newTestReconciler(t, state, evaluator).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+
+		require.ErrorIs(t, err, writeErr)
+		require.Len(t, result.MappingOutcomes, 2)
+		assert.Equal(t, firstID, result.MappingOutcomes[0].MappingID)
+		assert.Equal(t, secondID, result.MappingOutcomes[1].MappingID)
+		assert.ErrorIs(t, result.MappingOutcomes[0].Err, writeErr)
+		assert.ErrorIs(t, result.MappingOutcomes[1].Err, writeErr)
 	})
 }
 

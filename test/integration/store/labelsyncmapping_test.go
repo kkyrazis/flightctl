@@ -106,6 +106,67 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(lo.FromPtr(first.Metadata.Name)).To(Equal("scalar"))
 	})
 
+	It("When a worker reports a mapping failure it should conditionally degrade only the captured generation", func() {
+		mappingHandler := labelsyncmappingservice.NewServiceHandler(mappingStore)
+		created, status := mappingHandler.CreateLabelSyncMapping(ctx, orgID, *newLabelSyncMapping("worker-failure", "architecture"))
+		Expect(status.Code).To(Equal(int32(201)))
+		_, status = mappingHandler.CreateLabelSyncMapping(ctx, orgID, *newLabelSyncMapping("unaffected", "site"))
+		Expect(status.Code).To(Equal(int32(201)))
+		var err error
+		var identity model.LabelSyncMapping
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "worker-failure").Take(&identity).Error).To(Succeed())
+		failureStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		failure := labelsyncmappingstore.ReconciliationFailure{
+			MappingID:        identity.ID,
+			Generation:       lo.FromPtr(created.Metadata.Generation),
+			DeletionRevision: identity.DeletionRevision,
+			Message:          "expression evaluation failed",
+		}
+
+		updated, err := failureStore.RecordReconciliationFailure(ctx, orgID, failure)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+		degraded, err := mappingStore.Get(ctx, orgID, "worker-failure")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(degraded.Status.Conditions)).To(ContainElement(SatisfyAll(
+			HaveField("Type", domain.ConditionType("Ready")),
+			HaveField("Status", domain.ConditionStatusFalse),
+			HaveField("Reason", "Degraded"),
+			HaveField("Message", "expression evaluation failed"),
+			HaveField("ObservedGeneration", lo.ToPtr(int64(1))),
+		)))
+		unaffected, err := mappingStore.Get(ctx, orgID, "unaffected")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(unaffected.Status.Conditions)[0].Reason).To(Equal("Pending"))
+		var unaffectedIdentity model.LabelSyncMapping
+		Expect(db.Select("failure_revision").Where("org_id = ? AND name = ?", orgID, "unaffected").Take(&unaffectedIdentity).Error).To(Succeed())
+		Expect(unaffectedIdentity.FailureRevision).To(BeZero())
+
+		updated, err = failureStore.RecordReconciliationFailure(ctx, orgID, failure)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+		Expect(db.Select("failure_revision").Where("org_id = ? AND id = ?", orgID, identity.ID).Take(&identity).Error).To(Succeed())
+		Expect(identity.FailureRevision).To(Equal(int64(2)))
+
+		staleFailure := failure
+		staleFailure.Generation++
+		updated, err = failureStore.RecordReconciliationFailure(ctx, orgID, staleFailure)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeFalse())
+		Expect(db.Select("failure_revision").Where("org_id = ? AND id = ?", orgID, identity.ID).Take(&identity).Error).To(Succeed())
+		Expect(identity.FailureRevision).To(Equal(int64(2)))
+
+		deleted, err := mappingStore.Delete(ctx, orgID, "worker-failure")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+		updated, err = failureStore.RecordReconciliationFailure(ctx, orgID, failure)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeFalse())
+		Expect(db.Select("failure_revision").Where("org_id = ? AND id = ?", orgID, identity.ID).Take(&identity).Error).To(Succeed())
+		Expect(identity.FailureRevision).To(Equal(int64(2)))
+	})
+
 	It("When mapping names or keys belong to another organization it should isolate them", func() {
 		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
 		Expect(err).NotTo(HaveOccurred())

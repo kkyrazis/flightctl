@@ -188,7 +188,12 @@ func (s *desiredLabelState) enforceManagedLabelLimit() {
 func (s *desiredLabelState) outcomes() []MappingOutcome {
 	outcomes := make([]MappingOutcome, len(s.activeMappings))
 	for i, entry := range s.activeMappings {
-		outcomes[i] = MappingOutcome{MappingID: entry.ID, Err: errors.Join(s.failures[entry.ID]...)}
+		outcomes[i] = MappingOutcome{
+			MappingID:        entry.ID,
+			Generation:       lo.FromPtr(entry.Mapping.Metadata.Generation),
+			DeletionRevision: entry.DeletionRevision,
+			Err:              errors.Join(s.failures[entry.ID]...),
+		}
 	}
 	return outcomes
 }
