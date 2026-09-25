@@ -167,6 +167,210 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(identity.FailureRevision).To(Equal(int64(2)))
 	})
 
+	It("When scan targets are listed it should include pending degraded and terminating mappings for the organization", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("pending", "pending"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("degraded", "degraded"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("healthy", "healthy"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("terminating", "terminating"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, otherOrgID, newLabelSyncMapping("other-org", "other-org"))
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, name := range []string{"pending", "degraded", "healthy", "terminating", "other-org"} {
+			targetOrg := orgID
+			if name == "other-org" {
+				targetOrg = otherOrgID
+			}
+			status := domain.ConditionStatusFalse
+			reason := "Pending"
+			if name == "healthy" {
+				status = domain.ConditionStatusTrue
+				reason = "Success"
+			}
+			Expect(setMappingReadyCondition(ctx, db, targetOrg, name, status, reason)).To(Succeed())
+		}
+
+		var degradedIdentity model.LabelSyncMapping
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "degraded").Take(&degradedIdentity).Error).To(Succeed())
+		scanStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		failureToken, updated, err := scanStore.RecordMappingScanFailure(ctx, orgID, labelsyncmappingstore.ReconciliationFailure{
+			MappingID:  degradedIdentity.ID,
+			Generation: lo.FromPtr(degradedIdentity.Generation),
+			Message:    "selector evaluation failed",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+		Expect(failureToken.FailureRevision).To(Equal(int64(1)))
+
+		deleted, err := mappingStore.Delete(ctx, orgID, "terminating")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+
+		targets, err := scanStore.ListMappingScanTargets(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(targets).To(HaveLen(3))
+		byID := make(map[uuid.UUID]labelsyncmappingstore.MappingScanRecord, len(targets))
+		for _, target := range targets {
+			byID[target.MappingID] = target
+		}
+		for _, name := range []string{"pending", "degraded", "terminating"} {
+			var identity model.LabelSyncMapping
+			Expect(db.Where("org_id = ? AND name = ?", orgID, name).Take(&identity).Error).To(Succeed())
+			target, exists := byID[identity.ID]
+			Expect(exists).To(BeTrue(), "expected %s mapping in scan targets", name)
+			Expect(target.Generation).To(Equal(lo.FromPtr(identity.Generation)))
+			Expect(target.DeletionRevision).To(Equal(identity.DeletionRevision))
+			Expect(target.FailureRevision).To(Equal(identity.FailureRevision))
+		}
+		Expect(byID[degradedIdentity.ID].FailureRevision).To(Equal(int64(1)))
+	})
+
+	It("When a current mapping scan completes it should set Ready Success and preserve other conditions", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("complete", "complete"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(setMappingStatus(ctx, db, orgID, "complete", domain.LabelSyncMappingStatus{Conditions: &[]domain.Condition{
+			{Type: domain.ConditionType("Ready"), Status: domain.ConditionStatusFalse, Reason: "Pending", ObservedGeneration: lo.ToPtr(int64(1))},
+			{Type: domain.ConditionType("Validation"), Status: domain.ConditionStatusTrue, Reason: "Valid"},
+		}})).To(Succeed())
+
+		scanStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		targets, err := scanStore.ListMappingScanTargets(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(targets).To(HaveLen(1))
+
+		completed, err := scanStore.CompleteMappingScan(ctx, orgID, targets)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(completed).To(HaveKeyWithValue(targets[0].MappingID, true))
+		mapping, err := mappingStore.Get(ctx, orgID, "complete")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(mapping.Status.Conditions)).To(ContainElement(SatisfyAll(
+			HaveField("Type", domain.ConditionType("Ready")),
+			HaveField("Status", domain.ConditionStatusTrue),
+			HaveField("Reason", "Success"),
+			HaveField("ObservedGeneration", lo.ToPtr(int64(1))),
+		)))
+		Expect(lo.FromPtr(mapping.Status.Conditions)).To(ContainElement(SatisfyAll(
+			HaveField("Type", domain.ConditionType("Validation")),
+			HaveField("Status", domain.ConditionStatusTrue),
+			HaveField("Reason", "Valid"),
+		)))
+	})
+
+	It("When a captured mapping token becomes stale it should fence only that mapping", func() {
+		for _, name := range []string{"generation-stale", "deletion-stale", "failure-stale", "id-stale", "current"} {
+			_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping(name, name))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(setMappingReadyCondition(ctx, db, orgID, name, domain.ConditionStatusFalse, "Pending")).To(Succeed())
+		}
+		scanStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		targets, err := scanStore.ListMappingScanTargets(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(targets).To(HaveLen(5))
+		byName := make(map[string]labelsyncmappingstore.MappingScanRecord, len(targets))
+		for _, target := range targets {
+			var identity model.LabelSyncMapping
+			Expect(db.Where("org_id = ? AND id = ?", orgID, target.MappingID).Take(&identity).Error).To(Succeed())
+			byName[identity.Name] = target
+		}
+
+		var generationIdentity, deletionIdentity, failureIdentity, currentIdentity model.LabelSyncMapping
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "generation-stale").Take(&generationIdentity).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "deletion-stale").Take(&deletionIdentity).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "failure-stale").Take(&failureIdentity).Error).To(Succeed())
+		Expect(db.Where("org_id = ? AND name = ?", orgID, "current").Take(&currentIdentity).Error).To(Succeed())
+		Expect(db.Model(&model.LabelSyncMapping{}).Where("org_id = ? AND id = ?", orgID, generationIdentity.ID).Update("generation", 2).Error).To(Succeed())
+		now := time.Now().UTC()
+		Expect(db.Model(&model.LabelSyncMapping{}).Where("org_id = ? AND id = ?", orgID, deletionIdentity.ID).Updates(map[string]interface{}{
+			"deletion_timestamp": now,
+			"deletion_revision":  2,
+		}).Error).To(Succeed())
+		Expect(db.Model(&model.LabelSyncMapping{}).Where("org_id = ? AND id = ?", orgID, failureIdentity.ID).Update("failure_revision", 1).Error).To(Succeed())
+
+		staleID := byName["id-stale"]
+		staleID.MappingID = uuid.New()
+		staleTargets := []labelsyncmappingstore.MappingScanRecord{
+			byName["generation-stale"],
+			byName["deletion-stale"],
+			byName["failure-stale"],
+			staleID,
+			byName["current"],
+		}
+		completed, err := scanStore.CompleteMappingScan(ctx, orgID, staleTargets)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(completed).To(HaveKeyWithValue(generationIdentity.ID, false))
+		Expect(completed).To(HaveKeyWithValue(deletionIdentity.ID, false))
+		Expect(completed).To(HaveKeyWithValue(failureIdentity.ID, false))
+		Expect(completed).To(HaveKeyWithValue(staleID.MappingID, false))
+		Expect(completed).To(HaveKeyWithValue(currentIdentity.ID, true))
+		current, err := mappingStore.Get(ctx, orgID, "current")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(current.Status.Conditions)).To(ContainElement(SatisfyAll(
+			HaveField("Type", domain.ConditionType("Ready")),
+			HaveField("Status", domain.ConditionStatusTrue),
+			HaveField("Reason", "Success"),
+		)))
+	})
+
+	It("When a terminating mapping scan finishes it should finalize only after owned labels are gone", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("terminating-empty", "terminating-empty"))
+		Expect(err).NotTo(HaveOccurred())
+		deleted, err := mappingStore.Delete(ctx, orgID, "terminating-empty")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+		scanStore, ok := mappingStore.(labelsyncmappingstore.ReconciliationStore)
+		Expect(ok).To(BeTrue())
+		targets, err := scanStore.ListMappingScanTargets(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		var token labelsyncmappingstore.MappingScanRecord
+		for _, target := range targets {
+			var identity model.LabelSyncMapping
+			Expect(db.Where("org_id = ? AND id = ?", orgID, target.MappingID).Take(&identity).Error).To(Succeed())
+			if identity.Name == "terminating-empty" {
+				token = target
+			}
+		}
+		Expect(token.MappingID).NotTo(Equal(uuid.Nil))
+
+		completed, err := scanStore.CompleteMappingScan(ctx, orgID, []labelsyncmappingstore.MappingScanRecord{token})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(completed).To(HaveKeyWithValue(token.MappingID, true))
+		_, err = mappingStore.Get(ctx, orgID, "terminating-empty")
+		Expect(err).To(MatchError(flterrors.ErrResourceNotFound))
+
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("terminating-owned", "terminating-owned"))
+		Expect(err).NotTo(HaveOccurred())
+		labels := map[string]string{"terminating-owned": "value"}
+		testutil.CreateTestDevice(ctx, deviceStore, orgID, "terminating-owned-device", nil, nil, &labels)
+		var ownedMapping model.LabelSyncMapping
+		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "terminating-owned").Take(&ownedMapping).Error).To(Succeed())
+		Expect(db.Model(&model.DeviceLabel{}).
+			Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "terminating-owned-device", "terminating-owned").
+			Update("label_sync_mapping_id", ownedMapping.ID).Error).To(Succeed())
+		deleted, err = mappingStore.Delete(ctx, orgID, "terminating-owned")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+		targets, err = scanStore.ListMappingScanTargets(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		var ownedToken labelsyncmappingstore.MappingScanRecord
+		for _, target := range targets {
+			if target.MappingID == ownedMapping.ID {
+				ownedToken = target
+			}
+		}
+		Expect(ownedToken.MappingID).To(Equal(ownedMapping.ID))
+		completed, err = scanStore.CompleteMappingScan(ctx, orgID, []labelsyncmappingstore.MappingScanRecord{ownedToken})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(completed).To(HaveKeyWithValue(ownedToken.MappingID, false))
+		_, err = mappingStore.Get(ctx, orgID, "terminating-owned")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("When mapping names or keys belong to another organization it should isolate them", func() {
 		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
 		Expect(err).NotTo(HaveOccurred())
@@ -970,6 +1174,21 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		}
 	})
 })
+
+func setMappingReadyCondition(ctx context.Context, db *gorm.DB, orgID uuid.UUID, name string, status domain.ConditionStatus, reason string) error {
+	return setMappingStatus(ctx, db, orgID, name, domain.LabelSyncMappingStatus{Conditions: &[]domain.Condition{{
+		Type:               domain.ConditionType("Ready"),
+		Status:             status,
+		Reason:             reason,
+		ObservedGeneration: lo.ToPtr(int64(1)),
+	}}})
+}
+
+func setMappingStatus(ctx context.Context, db *gorm.DB, orgID uuid.UUID, name string, status domain.LabelSyncMappingStatus) error {
+	return db.WithContext(ctx).Model(&model.LabelSyncMapping{}).
+		Where("org_id = ? AND name = ?", orgID, name).
+		Update("status", model.MakeJSONField(status)).Error
+}
 
 func labelSyncRevision(ctx context.Context, db *gorm.DB, orgID uuid.UUID, resourceType domain.LabelSyncMappingResourceType) (int64, error) {
 	var state model.LabelSyncState

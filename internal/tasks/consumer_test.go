@@ -850,6 +850,18 @@ func (s *dispatchLabelReconciliationStore) RecordReconciliationFailure(context.C
 	return s.recordFailureErr == nil, s.recordFailureErr
 }
 
+func (*dispatchLabelReconciliationStore) ListMappingScanTargets(context.Context, uuid.UUID) ([]labelsyncmappingstore.MappingScanRecord, error) {
+	return nil, nil
+}
+
+func (*dispatchLabelReconciliationStore) RecordMappingScanFailure(context.Context, uuid.UUID, labelsyncmappingstore.ReconciliationFailure) (labelsyncmappingstore.MappingScanRecord, bool, error) {
+	return labelsyncmappingstore.MappingScanRecord{}, false, nil
+}
+
+func (*dispatchLabelReconciliationStore) CompleteMappingScan(context.Context, uuid.UUID, []labelsyncmappingstore.MappingScanRecord) (map[uuid.UUID]bool, error) {
+	return map[uuid.UUID]bool{}, nil
+}
+
 type dispatchLabelReconciliationEvents struct {
 	created []*domain.Event
 }

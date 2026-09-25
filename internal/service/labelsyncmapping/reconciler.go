@@ -17,6 +17,13 @@ import (
 
 const maxReconciliationAttempts = 5
 
+type MappingScanToken struct {
+	MappingID        uuid.UUID
+	Generation       int64
+	DeletionRevision *int64
+	FailureRevision  int64
+}
+
 type Reconciler struct {
 	store     labelsyncmapping.ReconciliationStore
 	evaluator Evaluator
@@ -123,6 +130,72 @@ func (r *Reconciler) RecordFailures(ctx context.Context, orgID uuid.UUID, outcom
 		}
 	}
 	return errors.Join(recordErrors...)
+}
+
+func (r *Reconciler) ListMappingScanTargets(ctx context.Context, orgID uuid.UUID) ([]MappingScanToken, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("label-sync reconciler is not configured")
+	}
+	records, err := r.store.ListMappingScanTargets(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	tokens := make([]MappingScanToken, len(records))
+	for i, record := range records {
+		tokens[i] = mappingScanToken(record)
+	}
+	return tokens, nil
+}
+
+func (r *Reconciler) RecordMappingScanFailure(ctx context.Context, orgID uuid.UUID, outcome MappingOutcome) (MappingScanToken, bool, error) {
+	if r == nil || r.store == nil {
+		return MappingScanToken{}, false, errors.New("label-sync reconciler is not configured")
+	}
+	if outcome.Err == nil {
+		return MappingScanToken{}, false, nil
+	}
+	record, updated, err := r.store.RecordMappingScanFailure(ctx, orgID, labelsyncmapping.ReconciliationFailure{
+		MappingID:        outcome.MappingID,
+		Generation:       outcome.Generation,
+		DeletionRevision: outcome.DeletionRevision,
+		Message:          outcome.Err.Error(),
+	})
+	if err != nil {
+		return MappingScanToken{}, false, err
+	}
+	return mappingScanToken(record), updated, nil
+}
+
+func (r *Reconciler) CompleteMappingScan(ctx context.Context, orgID uuid.UUID, tokens []MappingScanToken) (map[uuid.UUID]bool, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("label-sync reconciler is not configured")
+	}
+	records := make([]labelsyncmapping.MappingScanRecord, len(tokens))
+	for i, token := range tokens {
+		records[i] = labelsyncmapping.MappingScanRecord{
+			MappingID:        token.MappingID,
+			Generation:       token.Generation,
+			DeletionRevision: cloneInt64(token.DeletionRevision),
+			FailureRevision:  token.FailureRevision,
+		}
+	}
+	return r.store.CompleteMappingScan(ctx, orgID, records)
+}
+
+func mappingScanToken(record labelsyncmapping.MappingScanRecord) MappingScanToken {
+	return MappingScanToken{
+		MappingID:        record.MappingID,
+		Generation:       record.Generation,
+		DeletionRevision: cloneInt64(record.DeletionRevision),
+		FailureRevision:  record.FailureRevision,
+	}
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	return lo.ToPtr(*value)
 }
 
 func (r *Reconciler) emitLabelsUpdated(ctx context.Context, orgID uuid.UUID, deviceName string) {

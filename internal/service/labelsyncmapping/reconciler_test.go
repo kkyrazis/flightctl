@@ -49,6 +49,13 @@ type reconcilerStore struct {
 	appliedLabels    []map[string]labelsyncmappingstore.DesiredDeviceLabel
 	recordedFailures []labelsyncmappingstore.ReconciliationFailure
 	recordFailureErr error
+	scanTargets      []labelsyncmappingstore.MappingScanRecord
+	scanTargetsErr   error
+	scanFailure      labelsyncmappingstore.MappingScanRecord
+	scanFailureSaved bool
+	scanFailureErr   error
+	scanCompletion   map[uuid.UUID]bool
+	scanCompleteErr  error
 	onApply          func()
 }
 
@@ -97,6 +104,19 @@ func (s *reconcilerStore) ApplyDeviceLabelReconciliation(_ context.Context, _ uu
 func (s *reconcilerStore) RecordReconciliationFailure(_ context.Context, _ uuid.UUID, failure labelsyncmappingstore.ReconciliationFailure) (bool, error) {
 	s.recordedFailures = append(s.recordedFailures, failure)
 	return true, s.recordFailureErr
+}
+
+func (s *reconcilerStore) ListMappingScanTargets(context.Context, uuid.UUID) ([]labelsyncmappingstore.MappingScanRecord, error) {
+	return s.scanTargets, s.scanTargetsErr
+}
+
+func (s *reconcilerStore) RecordMappingScanFailure(_ context.Context, _ uuid.UUID, failure labelsyncmappingstore.ReconciliationFailure) (labelsyncmappingstore.MappingScanRecord, bool, error) {
+	s.recordedFailures = append(s.recordedFailures, failure)
+	return s.scanFailure, s.scanFailureSaved, s.scanFailureErr
+}
+
+func (s *reconcilerStore) CompleteMappingScan(context.Context, uuid.UUID, []labelsyncmappingstore.MappingScanRecord) (map[uuid.UUID]bool, error) {
+	return s.scanCompletion, s.scanCompleteErr
 }
 
 func cloneDesiredLabels(labels map[string]labelsyncmappingstore.DesiredDeviceLabel) map[string]labelsyncmappingstore.DesiredDeviceLabel {
@@ -554,6 +574,63 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 		assert.Equal(t, secondID, result.MappingOutcomes[1].MappingID)
 		assert.ErrorIs(t, result.MappingOutcomes[0].Err, writeErr)
 		assert.ErrorIs(t, result.MappingOutcomes[1].Err, writeErr)
+	})
+}
+
+func TestReconcilerMappingScanStoreBoundary(t *testing.T) {
+	orgID := uuid.New()
+	mappingID := reconciliationTestID("000000000091")
+	deletionRevision := int64(14)
+	storeRecord := labelsyncmappingstore.MappingScanRecord{
+		MappingID:        mappingID,
+		Generation:       3,
+		DeletionRevision: &deletionRevision,
+		FailureRevision:  8,
+	}
+	token := MappingScanToken{
+		MappingID:        mappingID,
+		Generation:       3,
+		DeletionRevision: &deletionRevision,
+		FailureRevision:  8,
+	}
+
+	t.Run("When scan targets are listed it should preserve every completion token field", func(t *testing.T) {
+		state := &reconcilerStore{scanTargets: []labelsyncmappingstore.MappingScanRecord{storeRecord}}
+		actual, err := newTestReconciler(t, state, &fakeEvaluator{}).ListMappingScanTargets(context.Background(), orgID)
+
+		require.NoError(t, err)
+		require.Equal(t, []MappingScanToken{token}, actual)
+	})
+
+	t.Run("When a scan failure is recorded it should return the new failure revision", func(t *testing.T) {
+		state := &reconcilerStore{scanFailure: storeRecord, scanFailureSaved: true}
+		outcome := MappingOutcome{
+			MappingID:        mappingID,
+			Generation:       3,
+			DeletionRevision: &deletionRevision,
+			Err:              errors.New("device reconciliation failed"),
+		}
+
+		updated, saved, err := newTestReconciler(t, state, &fakeEvaluator{}).RecordMappingScanFailure(context.Background(), orgID, outcome)
+
+		require.NoError(t, err)
+		require.True(t, saved)
+		require.Equal(t, token, updated)
+		require.Len(t, state.recordedFailures, 1)
+		require.Equal(t, labelsyncmappingstore.ReconciliationFailure{
+			MappingID:        mappingID,
+			Generation:       3,
+			DeletionRevision: &deletionRevision,
+			Message:          "device reconciliation failed",
+		}, state.recordedFailures[0])
+	})
+
+	t.Run("When completion is fenced it should return per-mapping results", func(t *testing.T) {
+		state := &reconcilerStore{scanCompletion: map[uuid.UUID]bool{mappingID: false}}
+		actual, err := newTestReconciler(t, state, &fakeEvaluator{}).CompleteMappingScan(context.Background(), orgID, []MappingScanToken{token})
+
+		require.NoError(t, err)
+		require.Equal(t, map[uuid.UUID]bool{mappingID: false}, actual)
 	})
 }
 

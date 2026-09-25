@@ -165,7 +165,153 @@ func (s *labelSyncMappingStore) ApplyDeviceLabelReconciliation(ctx context.Conte
 	return writeResult, nil
 }
 
+func (s *labelSyncMappingStore) ListMappingScanTargets(ctx context.Context, orgID uuid.UUID) ([]MappingScanRecord, error) {
+	var mappings []model.LabelSyncMapping
+	if err := s.getDB(ctx).Where("org_id = ? AND spec IS NOT NULL", orgID).Order("name ASC").Find(&mappings).Error; err != nil {
+		return nil, err
+	}
+
+	targets := make([]MappingScanRecord, 0, len(mappings))
+	for _, mapping := range mappings {
+		if mapping.Spec == nil || mapping.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingNeedsScan(mapping) {
+			continue
+		}
+		targets = append(targets, MappingScanRecord{
+			MappingID:        mapping.ID,
+			Generation:       lo.FromPtr(mapping.Generation),
+			DeletionRevision: cloneInt64(mapping.DeletionRevision),
+			FailureRevision:  mapping.FailureRevision,
+		})
+	}
+	return targets, nil
+}
+
+func mappingNeedsScan(mapping model.LabelSyncMapping) bool {
+	if mapping.DeletionTimestamp != nil {
+		return true
+	}
+	if mapping.Status == nil || mapping.Status.Data.Conditions == nil {
+		return false
+	}
+	for _, condition := range *mapping.Status.Data.Conditions {
+		if condition.Type == domain.ConditionType("Ready") && condition.Status == domain.ConditionStatusFalse &&
+			(condition.Reason == "Pending" || condition.Reason == "Degraded") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *labelSyncMappingStore) CompleteMappingScan(ctx context.Context, orgID uuid.UUID, targets []MappingScanRecord) (map[uuid.UUID]bool, error) {
+	completed := make(map[uuid.UUID]bool, len(targets))
+	for _, target := range targets {
+		completed[target.MappingID] = false
+	}
+	if len(targets) == 0 {
+		return completed, nil
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(targets))
+	err := store.RunInTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if err := lockMappingSet(tx, orgID, domain.LabelSyncMappingDevice); err != nil {
+			return err
+		}
+		if err := lockState(tx, orgID, domain.LabelSyncMappingDevice); err != nil {
+			return err
+		}
+
+		for _, target := range targets {
+			if _, duplicate := seen[target.MappingID]; duplicate {
+				continue
+			}
+			seen[target.MappingID] = struct{}{}
+
+			var current model.LabelSyncMapping
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("org_id = ? AND id = ?", orgID, target.MappingID).Take(&current).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			if err != nil {
+				return store.ErrorFromGormError(err)
+			}
+			if current.Spec == nil || current.Spec.Data.ResourceType != domain.LabelSyncMappingDevice || !mappingMatchesScanToken(current, target) {
+				continue
+			}
+
+			if current.DeletionTimestamp != nil {
+				var owned int64
+				if err := tx.Model(&model.DeviceLabel{}).Where("org_id = ? AND label_sync_mapping_id = ?", orgID, current.ID).Count(&owned).Error; err != nil {
+					return err
+				}
+				if owned > 0 {
+					continue
+				}
+				deleted := tx.Unscoped().Where("org_id = ? AND id = ?", orgID, current.ID).Delete(&model.LabelSyncMapping{})
+				if deleted.Error != nil {
+					return store.ErrorFromGormError(deleted.Error)
+				}
+				if deleted.RowsAffected == 1 {
+					if err := s.incrementRevision(tx, orgID, domain.LabelSyncMappingDevice); err != nil {
+						return err
+					}
+					completed[target.MappingID] = true
+				}
+				continue
+			}
+
+			status := domain.LabelSyncMappingStatus{Conditions: &[]domain.Condition{}}
+			if current.Status != nil {
+				status = current.Status.Data
+				if status.Conditions == nil {
+					status.Conditions = &[]domain.Condition{}
+				}
+			}
+			domain.SetStatusCondition(status.Conditions, domain.Condition{
+				Type:               domain.ConditionType("Ready"),
+				Status:             domain.ConditionStatusTrue,
+				Reason:             "Success",
+				Message:            "Mapping propagation is complete",
+				ObservedGeneration: lo.ToPtr(target.Generation),
+			})
+			write := tx.Model(&model.LabelSyncMapping{}).
+				Where("org_id = ? AND id = ? AND generation = ? AND failure_revision = ?", orgID, target.MappingID, target.Generation, target.FailureRevision)
+			if target.DeletionRevision == nil {
+				write = write.Where("deletion_revision IS NULL")
+			} else {
+				write = write.Where("deletion_revision = ?", *target.DeletionRevision)
+			}
+			result := write.Update("status", model.MakeJSONField(status))
+			if result.Error != nil {
+				return store.ErrorFromGormError(result.Error)
+			}
+			completed[target.MappingID] = result.RowsAffected == 1
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return completed, nil
+}
+
+func mappingMatchesScanToken(mapping model.LabelSyncMapping, target MappingScanRecord) bool {
+	if mapping.ID != target.MappingID || lo.FromPtr(mapping.Generation) != target.Generation || mapping.FailureRevision != target.FailureRevision {
+		return false
+	}
+	if mapping.DeletionRevision == nil || target.DeletionRevision == nil {
+		return mapping.DeletionRevision == nil && target.DeletionRevision == nil
+	}
+	return *mapping.DeletionRevision == *target.DeletionRevision
+}
+
 func (s *labelSyncMappingStore) RecordReconciliationFailure(ctx context.Context, orgID uuid.UUID, failure ReconciliationFailure) (bool, error) {
+	_, updated, err := s.RecordMappingScanFailure(ctx, orgID, failure)
+	return updated, err
+}
+
+func (s *labelSyncMappingStore) RecordMappingScanFailure(ctx context.Context, orgID uuid.UUID, failure ReconciliationFailure) (MappingScanRecord, bool, error) {
+	var record MappingScanRecord
 	updated := false
 	err := store.RunInTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -199,7 +345,8 @@ func (s *labelSyncMappingStore) RecordReconciliationFailure(ctx context.Context,
 			ObservedGeneration: lo.ToPtr(failure.Generation),
 		})
 
-		write := tx.Model(&model.LabelSyncMapping{}).
+		write := tx.Model(&current).
+			Clauses(clause.Returning{Columns: []clause.Column{{Name: "failure_revision"}}}).
 			Where("org_id = ? AND id = ? AND generation = ?", orgID, failure.MappingID, failure.Generation)
 		if failure.DeletionRevision == nil {
 			write = write.Where("deletion_revision IS NULL")
@@ -214,9 +361,17 @@ func (s *labelSyncMappingStore) RecordReconciliationFailure(ctx context.Context,
 			return store.ErrorFromGormError(result.Error)
 		}
 		updated = result.RowsAffected == 1
+		if updated {
+			record = MappingScanRecord{
+				MappingID:        current.ID,
+				Generation:       lo.FromPtr(current.Generation),
+				DeletionRevision: cloneInt64(current.DeletionRevision),
+				FailureRevision:  current.FailureRevision,
+			}
+		}
 		return nil
 	})
-	return updated, err
+	return record, updated, err
 }
 
 func reconciliationKeys(snapshot DeviceLabelReconciliationSnapshot, desired map[string]DesiredDeviceLabel) []string {
