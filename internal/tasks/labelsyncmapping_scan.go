@@ -57,7 +57,6 @@ type LabelMappingScanTask struct {
 	deviceSvc   deviceservice.Service
 	checkpoints checkpointservice.Service
 	config      LabelMappingScanConfig
-	now         func() time.Time
 }
 
 func NewLabelMappingScanTask(
@@ -85,7 +84,6 @@ func NewLabelMappingScanTask(
 		deviceSvc:   deviceSvc,
 		checkpoints: checkpoints,
 		config:      config,
-		now:         time.Now,
 	}, nil
 }
 
@@ -117,7 +115,7 @@ func (t *LabelMappingScanTask) Poll(ctx context.Context, orgID uuid.UUID) {
 		return
 	}
 
-	startedAt := t.now()
+	startedAt := time.Now()
 	for {
 		if err := ctx.Err(); err != nil {
 			t.log.WithError(err).WithField("orgID", orgID).Warn("Mapping scan stopped before the next page")
@@ -161,7 +159,7 @@ func (t *LabelMappingScanTask) Poll(ctx context.Context, orgID uuid.UUID) {
 			t.completeCampaign(ctx, orgID, checkpoint)
 			return
 		}
-		if t.now().Sub(startedAt) >= t.config.TimeBudget {
+		if time.Since(startedAt) >= t.config.TimeBudget {
 			t.log.WithFields(logrus.Fields{"orgID": orgID, "pageSize": t.config.PageSize, "timeBudget": t.config.TimeBudget}).Info("Mapping scan reached its execution time budget")
 			return
 		}
@@ -211,10 +209,6 @@ func (t *LabelMappingScanTask) recordDeviceOutcomes(
 ) error {
 	byID := make(map[uuid.UUID]labelsyncmappingservice.MappingOutcome, len(outcomes))
 	for _, outcome := range outcomes {
-		previous, exists := byID[outcome.MappingID]
-		if exists {
-			outcome.Err = errors.Join(previous.Err, outcome.Err)
-		}
 		byID[outcome.MappingID] = outcome
 	}
 	if errors.Is(reconcileErr, context.Canceled) || errors.Is(reconcileErr, context.DeadlineExceeded) {
@@ -316,9 +310,7 @@ func mappingScanCampaignCheckpoint(
 ) mappingScanCheckpoint {
 	current := make(map[uuid.UUID]labelsyncmappingservice.MappingScanToken, len(targets))
 	for _, target := range targets {
-		if target.MappingID != uuid.Nil {
-			current[target.MappingID] = target
-		}
+		current[target.MappingID] = target
 	}
 	if resume && len(checkpoint.Mappings) > 0 {
 		remaining := make([]mappingScanProgress, 0, len(checkpoint.Mappings))
@@ -334,9 +326,6 @@ func mappingScanCampaignCheckpoint(
 	}
 	checkpoint = mappingScanCheckpoint{Version: mappingScanCheckpointVersion, Mappings: make([]mappingScanProgress, 0, len(targets))}
 	for _, target := range targets {
-		if target.MappingID == uuid.Nil {
-			continue
-		}
 		checkpoint.Mappings = append(checkpoint.Mappings, mappingScanProgress{Token: cloneMappingScanToken(target)})
 	}
 	return checkpoint

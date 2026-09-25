@@ -153,22 +153,10 @@ func TestMappingScanTaskResumesCursorAndCompletesOnlyAfterFinalPage(t *testing.T
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-2")}}, domain.StatusOK()
 		},
 	)
-	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Nanosecond}, logrus.New())
 	require.NoError(t, err)
-	start := time.Now()
-	now := start
-	clockCalls := 0
-	task.now = func() time.Time {
-		clockCalls++
-		if clockCalls == 1 {
-			return start
-		}
-		return now
-	}
-
 	// The first complete page exceeds the budget; its cursor is checkpointed and
 	// completion must wait for the next scheduled run.
-	now = start.Add(2 * time.Second)
 	task.Poll(ctx, orgID)
 	require.Empty(t, reconciler.completed)
 	require.NotNil(t, checkpointHarness.data)
@@ -178,7 +166,6 @@ func TestMappingScanTaskResumesCursorAndCompletesOnlyAfterFinalPage(t *testing.T
 
 	// The following run resumes at the saved opaque cursor and completes the
 	// campaign after its final page.
-	task.now = func() time.Time { return now }
 	task.Poll(ctx, orgID)
 	require.Equal(t, [][]labelsyncmappingservice.MappingScanToken{{token}}, reconciler.completed)
 	finalCheckpoint := decodeMappingScanCheckpointBytes(t, checkpointHarness.data)
@@ -331,17 +318,8 @@ func TestMappingScanTaskRestartsOnlyTheMappingWithAChangedToken(t *testing.T) {
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-3")}}, domain.StatusOK()
 		},
 	)
-	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Nanosecond}, logrus.New())
 	require.NoError(t, err)
-	start := time.Now()
-	clockCalls := 0
-	task.now = func() time.Time {
-		clockCalls++
-		if clockCalls == 1 {
-			return start
-		}
-		return start.Add(2 * time.Second)
-	}
 
 	// Save progress for both mappings at one shared cursor.
 	task.Poll(ctx, orgID)
