@@ -34,6 +34,16 @@ type labelSyncMappingStore struct {
 }
 
 func NewStore(db *gorm.DB, log logrus.FieldLogger) Store {
+	return newLabelSyncMappingStore(db, log)
+}
+
+// NewReconciliationStore returns the persistence operations used by the shared
+// device label reconciler and its worker failure recorder.
+func NewReconciliationStore(db *gorm.DB, log logrus.FieldLogger) ReconciliationStore {
+	return newLabelSyncMappingStore(db, log)
+}
+
+func newLabelSyncMappingStore(db *gorm.DB, log logrus.FieldLogger) *labelSyncMappingStore {
 	return &labelSyncMappingStore{
 		db: db,
 		genericStore: store.NewGenericStore[*model.LabelSyncMapping, model.LabelSyncMapping, domain.LabelSyncMapping, domain.LabelSyncMappingList](

@@ -35,9 +35,6 @@ func NewReconciler(store labelsyncmapping.ReconciliationStore, evaluator Evaluat
 }
 
 func (r *Reconciler) ReconcileDeviceLabels(ctx context.Context, orgID uuid.UUID, deviceName string) (ReconciliationResult, error) {
-	if r == nil || r.store == nil || r.evaluator == nil || r.events == nil {
-		return ReconciliationResult{}, errors.New("label-sync reconciler is not configured")
-	}
 	// The event store does not join caller-owned transactions. Reject nested
 	// reconciliation to avoid publishing an update for a label write that may
 	// still be rolled back by the caller.
@@ -45,7 +42,7 @@ func (r *Reconciler) ReconcileDeviceLabels(ctx context.Context, orgID uuid.UUID,
 		return ReconciliationResult{}, errors.New("label-sync reconciliation cannot run inside an existing store transaction")
 	}
 
-	for attempt := 0; attempt < maxReconciliationAttempts; attempt++ {
+	for attempt := range maxReconciliationAttempts {
 		if err := ctx.Err(); err != nil {
 			return ReconciliationResult{}, err
 		}
@@ -100,9 +97,6 @@ func failedDeviceOutcomes(mappings []labelsyncmapping.ReconciliationMapping, cur
 }
 
 func (r *Reconciler) RecordFailures(ctx context.Context, orgID uuid.UUID, outcomes []MappingOutcome) error {
-	if r == nil || r.store == nil {
-		return errors.New("label-sync reconciler is not configured")
-	}
 	var recordErrors []error
 	for _, outcome := range outcomes {
 		if outcome.Err == nil {
