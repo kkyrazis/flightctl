@@ -19,6 +19,7 @@ import (
 	deviceservice "github.com/flightctl/flightctl/internal/service/device"
 	eventservice "github.com/flightctl/flightctl/internal/service/event"
 	fleetservice "github.com/flightctl/flightctl/internal/service/fleet"
+	labelsyncmappingservice "github.com/flightctl/flightctl/internal/service/labelsyncmapping"
 	repositoryservice "github.com/flightctl/flightctl/internal/service/repository"
 	templateversionservice "github.com/flightctl/flightctl/internal/service/templateversion"
 	"github.com/flightctl/flightctl/internal/worker_client"
@@ -31,22 +32,23 @@ import (
 )
 
 type TaskConsumer struct {
-	FleetSvc           fleetservice.Service
-	TemplateversionSvc templateversionservice.Service
-	DeviceSvc          deviceservice.Service
-	DependencyrefSvc   dependencyrefservice.Service
-	RepositorySvc      repositoryservice.Service
-	CatalogSvc         catalogservice.Service
-	EventSvc           eventservice.Service
-	K8sClient          k8sclient.K8SClient
-	KVStore            kvstore.KVStore
-	Cfg                *config.Config
-	WorkerMetrics      *worker.WorkerCollector
-	EncryptionMigrator *EncryptionMigrator
-	QueuePublisher     queues.QueueProducer
-	WorkerClient       worker_client.WorkerClient
-	DeltaStore         generationLookup
-	Preparing          preparingClearer
+	FleetSvc            fleetservice.Service
+	TemplateversionSvc  templateversionservice.Service
+	DeviceSvc           deviceservice.Service
+	DependencyrefSvc    dependencyrefservice.Service
+	RepositorySvc       repositoryservice.Service
+	CatalogSvc          catalogservice.Service
+	EventSvc            eventservice.Service
+	K8sClient           k8sclient.K8SClient
+	KVStore             kvstore.KVStore
+	Cfg                 *config.Config
+	WorkerMetrics       *worker.WorkerCollector
+	EncryptionMigrator  *EncryptionMigrator
+	QueuePublisher      queues.QueueProducer
+	WorkerClient        worker_client.WorkerClient
+	DeltaStore          generationLookup
+	Preparing           preparingClearer
+	LabelSyncReconciler *labelsyncmappingservice.Reconciler
 }
 
 func (d TaskConsumer) dispatch() queues.ConsumeHandler {
@@ -106,6 +108,14 @@ func (d TaskConsumer) dispatch() queues.ConsumeHandler {
 			taskName = "fleetSelectorMatching"
 			err = runTaskWithMetrics(taskName, d.WorkerMetrics, func() error {
 				return fleetSelectorMatching(ctx, eventWithOrgId.OrgId, eventWithOrgId.Event, d.DeviceSvc, d.FleetSvc, log)
+			})
+			errorMessages = appendErrorMessage(errorMessages, taskName, err)
+		}
+		if shouldReconcileDeviceLabels(ctx, eventWithOrgId.Event) {
+			taskName = "deviceLabelReconciliation"
+			err = runTaskWithMetrics(taskName, d.WorkerMetrics, func() error {
+				logic := NewDeviceLabelReconciliationLogic(log, d.LabelSyncReconciler, eventWithOrgId.OrgId, eventWithOrgId.Event)
+				return logic.Reconcile(ctx)
 			})
 			errorMessages = appendErrorMessage(errorMessages, taskName, err)
 		}

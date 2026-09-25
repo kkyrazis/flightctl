@@ -45,7 +45,7 @@ func (r *Reconciler) ReconcileDeviceLabels(ctx context.Context, orgID uuid.UUID,
 		return ReconciliationResult{}, errors.New("label-sync reconciliation cannot run inside an existing store transaction")
 	}
 
-	for attempt := 0; attempt < maxReconciliationAttempts; attempt++ {
+	for attempt := range maxReconciliationAttempts {
 		if err := ctx.Err(); err != nil {
 			return ReconciliationResult{}, err
 		}

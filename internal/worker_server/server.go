@@ -23,6 +23,7 @@ import (
 	eventservice "github.com/flightctl/flightctl/internal/service/event"
 	"github.com/flightctl/flightctl/internal/service/events"
 	fleetservice "github.com/flightctl/flightctl/internal/service/fleet"
+	labelsyncmappingservice "github.com/flightctl/flightctl/internal/service/labelsyncmapping"
 	repositoryservice "github.com/flightctl/flightctl/internal/service/repository"
 	templateversionservice "github.com/flightctl/flightctl/internal/service/templateversion"
 	canarystore "github.com/flightctl/flightctl/internal/store/canary"
@@ -32,6 +33,7 @@ import (
 	devicestore "github.com/flightctl/flightctl/internal/store/device"
 	eventstore "github.com/flightctl/flightctl/internal/store/event"
 	fleetstore "github.com/flightctl/flightctl/internal/store/fleet"
+	labelsyncmappingstore "github.com/flightctl/flightctl/internal/store/labelsyncmapping"
 	repositorystore "github.com/flightctl/flightctl/internal/store/repository"
 	templateversionstore "github.com/flightctl/flightctl/internal/store/templateversion"
 	"github.com/flightctl/flightctl/internal/tasks"
@@ -115,6 +117,21 @@ func (s *Server) Run(ctx context.Context) error {
 	deltaStore := deltastore.NewStore(s.db, s.log.WithField("pkg", "delta-store"))
 
 	eventsSvc := events.NewServiceHandler(eventStore, workerClient, s.log)
+	labelSyncMappingEvaluator, err := labelsyncmappingservice.NewEvaluator()
+	if err != nil {
+		s.log.WithError(err).Error("failed to create device label mapping evaluator")
+		return err
+	}
+	labelSyncReconciler, err := labelsyncmappingservice.NewReconciler(
+		labelsyncmappingstore.NewReconciliationStore(s.db, s.log.WithField("pkg", "labelsyncmapping-store")),
+		labelSyncMappingEvaluator,
+		eventsSvc,
+		s.log.WithField("pkg", "device-label-reconciliation"),
+	)
+	if err != nil {
+		s.log.WithError(err).Error("failed to create device label mapping reconciler")
+		return err
+	}
 
 	fleetSvc := fleetservice.WrapWithTracing(fleetservice.NewServiceHandler(fleetStore, catStore, eventsSvc, s.log))
 	templateVersionSvc := templateversionservice.WrapWithTracing(templateversionservice.NewServiceHandler(templateVersionStore, kvStore, eventsSvc, s.log))
@@ -136,22 +153,23 @@ func (s *Server) Run(ctx context.Context) error {
 	)
 
 	if err = tasks.LaunchConsumers(ctx, s.queuesProvider, tasks.TaskConsumer{
-		FleetSvc:           fleetSvc,
-		TemplateversionSvc: templateVersionSvc,
-		DeviceSvc:          deviceSvc,
-		DependencyrefSvc:   dependencyrefSvc,
-		RepositorySvc:      repositorySvc,
-		CatalogSvc:         catalogSvc,
-		EventSvc:           eventSvc,
-		K8sClient:          s.k8sClient,
-		KVStore:            kvStore,
-		Cfg:                s.cfg,
-		WorkerMetrics:      s.workerMetrics,
-		EncryptionMigrator: encryptionMigrator,
-		QueuePublisher:     publisher,
-		WorkerClient:       workerClient,
-		DeltaStore:         deltaStore,
-		Preparing:          workerservice.NewStorePreparingStatus(fleetStore, deviceStore),
+		FleetSvc:            fleetSvc,
+		TemplateversionSvc:  templateVersionSvc,
+		DeviceSvc:           deviceSvc,
+		DependencyrefSvc:    dependencyrefSvc,
+		RepositorySvc:       repositorySvc,
+		CatalogSvc:          catalogSvc,
+		EventSvc:            eventSvc,
+		K8sClient:           s.k8sClient,
+		KVStore:             kvStore,
+		Cfg:                 s.cfg,
+		WorkerMetrics:       s.workerMetrics,
+		EncryptionMigrator:  encryptionMigrator,
+		QueuePublisher:      publisher,
+		WorkerClient:        workerClient,
+		DeltaStore:          deltaStore,
+		Preparing:           workerservice.NewStorePreparingStatus(fleetStore, deviceStore),
+		LabelSyncReconciler: labelSyncReconciler,
 	}, 1, 1); err != nil {
 		s.log.WithError(err).Error("failed to launch consumers")
 		return err
