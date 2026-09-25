@@ -95,19 +95,7 @@ func (s *fakeStore) Delete(_ context.Context, orgID uuid.UUID, name string) (boo
 	return true, nil
 }
 
-func (*fakeStore) Revision(context.Context, uuid.UUID, domain.LabelSyncMappingResourceType) (int64, error) {
-	return 0, nil
-}
-
 func (*fakeStore) FinalizeDelete(context.Context, uuid.UUID, string) (bool, error) {
-	return false, nil
-}
-
-func (*fakeStore) GetDevice(context.Context, uuid.UUID, string) (*domain.Device, error) {
-	return nil, flterrors.ErrResourceNotFound
-}
-
-func (*fakeStore) UpdateDeviceLabels(context.Context, uuid.UUID, string, int64, int64, map[string]string) (bool, error) {
 	return false, nil
 }
 

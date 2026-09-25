@@ -13,8 +13,7 @@ type DesiredDeviceLabel struct {
 }
 
 type DeviceLabelWriteResult struct {
-	LabelsChanged    bool
-	OwnershipChanged bool
+	LabelsChanged bool
 }
 
 type ReconciliationStore interface {

@@ -472,20 +472,15 @@ func TestReconcilerReconcileDeviceLabels(t *testing.T) {
 		assert.Empty(t, events.created)
 	})
 
-	t.Run("When labels are unchanged or only ownership changes it should not emit an update event", func(t *testing.T) {
-		for _, writeResult := range []labelsyncmappingstore.DeviceLabelWriteResult{
-			{},
-			{OwnershipChanged: true},
-		} {
-			state := &reconcilerStore{snapshot: reconciliationSnapshot(nil, nil), writeResult: writeResult}
-			events := &reconciliationEventService{}
+	t.Run("When labels are unchanged it should not emit an update event", func(t *testing.T) {
+		state := &reconcilerStore{snapshot: reconciliationSnapshot(nil, nil)}
+		events := &reconciliationEventService{}
 
-			result, err := newTestReconciler(t, state, &fakeEvaluator{}, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
+		result, err := newTestReconciler(t, state, &fakeEvaluator{}, events).ReconcileDeviceLabels(context.Background(), orgID, "edge-01")
 
-			require.NoError(t, err)
-			assert.False(t, result.LabelsChanged)
-			assert.Empty(t, events.created)
-		}
+		require.NoError(t, err)
+		assert.False(t, result.LabelsChanged)
+		assert.Empty(t, events.created)
 	})
 
 	t.Run("When loading the snapshot fails it should return a device-level error", func(t *testing.T) {

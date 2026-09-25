@@ -143,7 +143,6 @@ func (s *labelSyncMappingStore) ApplyDeviceLabelReconciliation(ctx context.Conte
 		}
 
 		writeResult.LabelsChanged = !maps.Equal(device.Labels, labels)
-		writeResult.OwnershipChanged = managedLabelOwnersChanged(snapshot.DeviceLabels, desired)
 		if writeResult.LabelsChanged {
 			if err := updateDeviceLabelValues(tx, orgID, deviceName, resourceVersion, labels); err != nil {
 				return err
@@ -206,22 +205,6 @@ func sameMappingID(left, right *uuid.UUID) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
-}
-
-func managedLabelOwnersChanged(current []DeviceLabelOwnership, desired map[string]DesiredDeviceLabel) bool {
-	currentOwners := make(map[string]uuid.UUID)
-	for _, label := range current {
-		if label.MappingID != nil {
-			currentOwners[label.Key] = *label.MappingID
-		}
-	}
-	desiredOwners := make(map[string]uuid.UUID)
-	for key, label := range desired {
-		if label.MappingID != nil {
-			desiredOwners[key] = *label.MappingID
-		}
-	}
-	return !maps.Equal(currentOwners, desiredOwners)
 }
 
 func updateDeviceLabelValues(tx *gorm.DB, orgID uuid.UUID, deviceName string, resourceVersion int64, labels map[string]string) error {

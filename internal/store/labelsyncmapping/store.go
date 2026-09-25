@@ -26,12 +26,6 @@ type Store interface {
 	List(context.Context, uuid.UUID, store.ListParams) (*domain.LabelSyncMappingList, error)
 	Delete(context.Context, uuid.UUID, string) (bool, error)
 	FinalizeDelete(context.Context, uuid.UUID, string) (bool, error)
-	Revision(context.Context, uuid.UUID, domain.LabelSyncMappingResourceType) (int64, error)
-	// GetDevice and UpdateDeviceLabels are the label-sync reconciler's narrow
-	// device access surface. UpdateDeviceLabels applies both the device resource
-	// version and the mapping revision as compare-and-swap preconditions.
-	GetDevice(context.Context, uuid.UUID, string) (*domain.Device, error)
-	UpdateDeviceLabels(context.Context, uuid.UUID, string, int64, int64, map[string]string) (bool, error)
 }
 
 type labelSyncMappingStore struct {
@@ -342,50 +336,6 @@ func (s *labelSyncMappingStore) FinalizeDelete(ctx context.Context, orgID uuid.U
 		return false, nil
 	}
 	return finalized, err
-}
-
-func (s *labelSyncMappingStore) Revision(ctx context.Context, orgID uuid.UUID, resourceType domain.LabelSyncMappingResourceType) (int64, error) {
-	state := model.LabelSyncState{}
-	err := s.getDB(ctx).Where("org_id = ? AND resource_type = ?", orgID, resourceType).Take(&state).Error
-	if err == gorm.ErrRecordNotFound {
-		return 0, nil
-	}
-	return state.Revision, err
-}
-
-func (s *labelSyncMappingStore) GetDevice(ctx context.Context, orgID uuid.UUID, name string) (*domain.Device, error) {
-	device := model.Device{}
-	if err := s.getDB(ctx).Where("org_id = ? AND name = ?", orgID, name).Take(&device).Error; err != nil {
-		return nil, store.ErrorFromGormError(err)
-	}
-	return device.ToApiResource()
-}
-
-// UpdateDeviceLabels updates a device's labels only when both the device resource
-// version and the device label-sync mapping revision still match the values used to
-// evaluate the labels. A false result is an expected optimistic-lock conflict; the
-// caller must reload and reconcile again rather than applying stale results.
-func (s *labelSyncMappingStore) UpdateDeviceLabels(ctx context.Context, orgID uuid.UUID, name string, resourceVersion, revision int64, labels map[string]string) (bool, error) {
-	var alias *string
-	if value, ok := labels["alias"]; ok {
-		alias = &value
-	}
-
-	result := s.getDB(ctx).Model(&model.Device{}).
-		Where("org_id = ? AND name = ? AND resource_version = ?", orgID, name, resourceVersion).
-		Where(
-			"COALESCE((SELECT revision FROM label_sync_state WHERE org_id = ? AND resource_type = ?), 0) = ?",
-			orgID, domain.LabelSyncMappingDevice, revision,
-		).
-		Updates(map[string]interface{}{
-			"alias":            alias,
-			"labels":           model.MakeJSONMap(labels),
-			"resource_version": gorm.Expr("resource_version + 1"),
-		})
-	if result.Error != nil {
-		return false, store.ErrorFromGormError(result.Error)
-	}
-	return result.RowsAffected == 1, nil
 }
 
 func (s *labelSyncMappingStore) incrementRevision(tx *gorm.DB, orgID uuid.UUID, resourceType domain.LabelSyncMappingResourceType) error {

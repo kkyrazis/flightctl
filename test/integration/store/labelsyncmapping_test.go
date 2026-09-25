@@ -68,7 +68,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		second, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("site", "site"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(second.Metadata.Name)).To(Equal("site"))
-		revision, err := mappingStore.Revision(ctx, orgID, api.LabelSyncMappingSpecResourceTypeDevice)
+		revision, err := labelSyncRevision(ctx, db, orgID, domain.LabelSyncMappingDevice)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal(int64(2)))
 		list, err := mappingStore.List(ctx, orgID, store.ListParams{})
@@ -143,7 +143,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(*tombstone.DeletionRevision).To(Equal(lo.FromPtr(tombstone.ResourceVersion)))
 		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("replacement", "architecture"))
 		Expect(err).To(MatchError(flterrors.ErrLabelSyncConflict))
-		revision, err := mappingStore.Revision(ctx, orgID, api.LabelSyncMappingSpecResourceTypeDevice)
+		revision, err := labelSyncRevision(ctx, db, orgID, domain.LabelSyncMappingDevice)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal(int64(3)))
 		finalized, err := mappingStore.FinalizeDelete(ctx, orgID, "architecture")
@@ -152,7 +152,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		_, err = mappingStore.Get(ctx, orgID, "architecture")
 		Expect(err).To(MatchError(ContainSubstring("resource not found")))
 		Expect(db.Unscoped().Where("org_id = ? AND name = ?", orgID, "architecture").Take(&tombstone).Error).To(MatchError(gorm.ErrRecordNotFound))
-		revision, err = mappingStore.Revision(ctx, orgID, api.LabelSyncMappingSpecResourceTypeDevice)
+		revision, err = labelSyncRevision(ctx, db, orgID, domain.LabelSyncMappingDevice)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal(int64(4)))
 		recreated, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
@@ -161,7 +161,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		var recreatedMapping model.LabelSyncMapping
 		Expect(db.Select("id").Where("org_id = ? AND name = ?", orgID, "architecture").Take(&recreatedMapping).Error).To(Succeed())
 		Expect(recreatedMapping.ID).NotTo(Equal(tombstone.ID))
-		revision, err = mappingStore.Revision(ctx, orgID, api.LabelSyncMappingSpecResourceTypeDevice)
+		revision, err = labelSyncRevision(ctx, db, orgID, domain.LabelSyncMappingDevice)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal(int64(5)))
 	})
@@ -260,35 +260,6 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(finalized).To(BeTrue())
 	})
 
-	It("When labels are reconciled it should require both the device and mapping revisions", func() {
-		labels := map[string]string{"manual": "preserved", "architecture": "stale"}
-		testutil.CreateTestDevice(ctx, deviceStore, orgID, "device-0", nil, nil, &labels)
-
-		device, err := mappingStore.GetDevice(ctx, orgID, "device-0")
-		Expect(err).NotTo(HaveOccurred())
-		resourceVersion, err := strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
-		Expect(err).NotTo(HaveOccurred())
-		updated, err := mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", resourceVersion, 0, map[string]string{"manual": "preserved", "architecture": "x86_64"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(updated).To(BeTrue())
-
-		device, err = mappingStore.GetDevice(ctx, orgID, "device-0")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{"manual": "preserved", "architecture": "x86_64"}))
-
-		updated, err = mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", 1, 0, map[string]string{"manual": "stale"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(updated).To(BeFalse())
-
-		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "systeminfo/architecture"))
-		Expect(err).NotTo(HaveOccurred())
-		resourceVersion, err = strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
-		Expect(err).NotTo(HaveOccurred())
-		updated, err = mappingStore.UpdateDeviceLabels(ctx, orgID, "device-0", resourceVersion, 0, map[string]string{"manual": "stale"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(updated).To(BeFalse())
-	})
-
 	It("When a device reconciliation snapshot is loaded it should include current labels, mapping identities, terminating mappings, and revision", func() {
 		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
 		Expect(err).NotTo(HaveOccurred())
@@ -380,8 +351,8 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		})
 
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
-		device, err := mappingStore.GetDevice(ctx, orgID, "apply-device")
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true}))
+		device, err := deviceStore.Get(ctx, orgID, "apply-device")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{"architecture": "aarch64", "manual": "preserved"}))
 		updatedResourceVersion, err := strconv.ParseInt(lo.FromPtr(device.Metadata.ResourceVersion), 10, 64)
@@ -413,7 +384,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		})
 		Expect(err).To(HaveOccurred())
 
-		device, err := mappingStore.GetDevice(ctx, orgID, "rollback-device")
+		device, err := deviceStore.Get(ctx, orgID, "rollback-device")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(labels))
 		var label model.DeviceLabel
@@ -446,10 +417,13 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		result, err := reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "owner-only-device", snapshot, desired)
 
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{OwnershipChanged: true}))
-		device, err := mappingStore.GetDevice(ctx, orgID, "owner-only-device")
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{}))
+		device, err := deviceStore.Get(ctx, orgID, "owner-only-device")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.ResourceVersion)).To(Equal(strconv.FormatInt(resourceVersion, 10)))
+		var architectureLabel model.DeviceLabel
+		Expect(db.Where("org_id = ? AND device_name = ? AND label_key = ?", orgID, "owner-only-device", "architecture").Take(&architectureLabel).Error).To(Succeed())
+		Expect(architectureLabel.LabelSyncMappingID).To(Equal(&mappingID))
 
 		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "owner-only-device", staleSnapshot, desired)
 		Expect(err).To(MatchError(labelsyncmappingstore.ErrDeviceLabelReconciliationConflict))
@@ -468,11 +442,13 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(ok).To(BeTrue())
 		snapshot, err := reconciliationStore.LoadDeviceLabelReconciliationSnapshot(ctx, orgID, "stale-device")
 		Expect(err).NotTo(HaveOccurred())
-		resourceVersion, err := strconv.ParseInt(lo.FromPtr(snapshot.Device.Metadata.ResourceVersion), 10, 64)
+		_, _, _, err = deviceStore.Mutate(ctx, orgID, "stale-device", &snapshot.Device, func(mutation *devicestore.DeviceMutation) error {
+			updatedLabels := lo.FromPtr(mutation.Device.Metadata.Labels)
+			updatedLabels["manual"] = "operator-update"
+			mutation.Device.Metadata.Labels = &updatedLabels
+			return nil
+		})
 		Expect(err).NotTo(HaveOccurred())
-		updated, err := mappingStore.UpdateDeviceLabels(ctx, orgID, "stale-device", resourceVersion, snapshot.MappingRevision, map[string]string{"manual": "operator-update"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(updated).To(BeTrue())
 
 		_, err = reconciliationStore.ApplyDeviceLabelReconciliation(ctx, orgID, "stale-device", snapshot, map[string]labelsyncmappingstore.DesiredDeviceLabel{
 			"manual": {Value: "before"},
@@ -525,7 +501,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 			"manual": {Value: "preserved"},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
+		Expect(result).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true}))
 		finalized, err := mappingStore.FinalizeDelete(ctx, orgID, "architecture")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(finalized).To(BeTrue())
@@ -561,7 +537,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 			Fail(fmt.Sprintf("reconciler did not begin evaluating before timeout: %v", reconcileCtx.Err()))
 		}
 
-		before, err := mappingStore.GetDevice(reconcileCtx, orgID, "device-update-race")
+		before, err := deviceStore.Get(reconcileCtx, orgID, "device-update-race")
 		Expect(err).NotTo(HaveOccurred())
 		_, _, _, err = deviceStore.Mutate(reconcileCtx, orgID, "device-update-race", before, func(mutation *devicestore.DeviceMutation) error {
 			updatedLabels := lo.FromPtr(mutation.Device.Metadata.Labels)
@@ -587,7 +563,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 			"device.status.systemInfo.architecture",
 		}))
 
-		device, err := mappingStore.GetDevice(ctx, orgID, "device-update-race")
+		device, err := deviceStore.Get(ctx, orgID, "device-update-race")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
 			"architecture": "device.status.systemInfo.architecture",
@@ -658,7 +634,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		Expect(reconciliation.result.MappingOutcomes[0].Err).NotTo(HaveOccurred())
 		Expect(evaluator.evaluatedExpressions()).To(Equal([]string{"old-expression", "current-expression"}))
 
-		device, err := mappingStore.GetDevice(ctx, orgID, "mapping-update-race")
+		device, err := deviceStore.Get(ctx, orgID, "mapping-update-race")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
 			"architecture": "current-expression",
@@ -745,7 +721,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		// converge; if the update won, the first pass itself exercises the CAS retry.
 		_, err = reconciler.ReconcileDeviceLabels(testCtx, orgID, "mapping-transaction-race")
 		Expect(err).NotTo(HaveOccurred())
-		device, err := mappingStore.GetDevice(testCtx, orgID, "mapping-transaction-race")
+		device, err := deviceStore.Get(testCtx, orgID, "mapping-transaction-race")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
 			"architecture": "current-expression",
@@ -818,7 +794,7 @@ var _ = Describe("LabelSyncMappingStore", func() {
 			Fail(fmt.Sprintf("operator update did not finish after the device-row contention: %v", testCtx.Err()))
 		}
 
-		device, err := mappingStore.GetDevice(testCtx, orgID, "device-transaction-race")
+		device, err := deviceStore.Get(testCtx, orgID, "device-transaction-race")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lo.FromPtr(device.Metadata.Labels)).To(Equal(map[string]string{
 			"architecture": "device.status.systemInfo.architecture",
@@ -894,14 +870,14 @@ var _ = Describe("LabelSyncMappingStore", func() {
 			select {
 			case result := <-results:
 				Expect(result.err).NotTo(HaveOccurred(), "device %s", result.deviceName)
-				Expect(result.write).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true, OwnershipChanged: true}))
+				Expect(result.write).To(Equal(labelsyncmappingstore.DeviceLabelWriteResult{LabelsChanged: true}))
 			case <-testCtx.Done():
 				Fail(fmt.Sprintf("overlapping reconciliations did not all complete: %v", testCtx.Err()))
 			}
 		}
 
 		for deviceIndex, deviceName := range deviceNames {
-			device, err := mappingStore.GetDevice(ctx, orgID, deviceName)
+			device, err := deviceStore.Get(ctx, orgID, deviceName)
 			Expect(err).NotTo(HaveOccurred())
 			labels := map[string]string{"manual": "preserved"}
 			for keyIndex := 0; keyIndex < sharedKeyCount; keyIndex++ {
@@ -933,6 +909,14 @@ var _ = Describe("LabelSyncMappingStore", func() {
 		}
 	})
 })
+
+func labelSyncRevision(ctx context.Context, db *gorm.DB, orgID uuid.UUID, resourceType domain.LabelSyncMappingResourceType) (int64, error) {
+	var state model.LabelSyncState
+	if err := db.WithContext(ctx).Where("org_id = ? AND resource_type = ?", orgID, resourceType).Take(&state).Error; err != nil {
+		return 0, err
+	}
+	return state.Revision, nil
+}
 
 func newLabelSyncMapping(name, key string) *api.LabelSyncMapping {
 	return &api.LabelSyncMapping{
