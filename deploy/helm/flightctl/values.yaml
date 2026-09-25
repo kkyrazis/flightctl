@@ -368,9 +368,9 @@ periodic:
         # -- How often to scan devices after a label mapping changes
         interval: 2m
       # -- Maximum number of devices in each label mapping scan page (1–1000)
-      pageSize: 100
+      pageSize: 1000
       # -- Maximum work time per label mapping scan invocation
-      timeBudget: 10s
+      timeBudget: 30s
 
 # -- Remote Access Configuration
 remoteAccess:

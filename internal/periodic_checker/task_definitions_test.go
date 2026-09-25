@@ -222,8 +222,8 @@ func TestLabelMappingScanTaskMetadataAndConfiguration(t *testing.T) {
 	require.Contains(t, MergeTasksWithConfig(nil), PeriodicTaskTypeLabelMappingScan)
 
 	defaults := labelMappingScanConfigFromConfig(config.NewDefault())
-	require.Equal(t, config.DefaultLabelMappingScanPageSize, defaults.PageSize)
-	require.Equal(t, config.DefaultLabelMappingScanTimeBudget, defaults.TimeBudget)
+	require.Equal(t, 1000, defaults.PageSize)
+	require.Equal(t, 30*time.Second, defaults.TimeBudget)
 
 	cfg := &config.Config{}
 	require.NoError(t, json.Unmarshal([]byte(`{

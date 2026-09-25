@@ -34,8 +34,8 @@ periodic:
     labelMappingScan:
       schedule:
         interval: {{if .periodic.tasks.labelMappingScan.schedule.interval}}{{.periodic.tasks.labelMappingScan.schedule.interval}}{{else}}2m{{end}}
-      pageSize: {{if and $labelMappingScan (ne (index $labelMappingScan "pageSize") nil)}}{{index $labelMappingScan "pageSize"}}{{else}}100{{end}}
-      timeBudget: {{if .periodic.tasks.labelMappingScan.timeBudget}}{{.periodic.tasks.labelMappingScan.timeBudget}}{{else}}10s{{end}}
+      pageSize: {{if and $labelMappingScan (ne (index $labelMappingScan "pageSize") nil)}}{{index $labelMappingScan "pageSize"}}{{else}}1000{{end}}
+      timeBudget: {{if .periodic.tasks.labelMappingScan.timeBudget}}{{.periodic.tasks.labelMappingScan.timeBudget}}{{else}}30s{{end}}
 {{ end }}
 {{- if eq .vulnerabilityReporting.enabled true}}
 vulnerabilityReporting:

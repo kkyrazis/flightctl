@@ -218,12 +218,12 @@ periodic:
     labelMappingScan:
       schedule:
         interval: 2m
-      pageSize: 100
-      timeBudget: 10s
+      pageSize: 1000
+      timeBudget: 30s
 ```
 
-The defaults are 2 minutes between runs, 100 devices per page, and 10 seconds of work per invocation. Page sizes can be
-increased up to 1000. The time budget is checked between complete pages; the saved cursor resumes the scan on a later
+The defaults are 2 minutes between runs, 1000 devices per page, and 30 seconds of work per invocation. Page sizes can be
+configured up to 1000. The time budget is checked between complete pages; the saved cursor resumes the scan on a later
 run.
 
 ### TLS/SSL Certificate Configuration

@@ -59,8 +59,8 @@ data:
           labelMappingScan:
             schedule:
               interval: {{ default "2m" .Values.periodic.tasks.labelMappingScan.schedule.interval }}
-            pageSize: {{ default 100 .Values.periodic.tasks.labelMappingScan.pageSize }}
-            timeBudget: {{ default "10s" .Values.periodic.tasks.labelMappingScan.timeBudget | quote }}
+            pageSize: {{ default 1000 .Values.periodic.tasks.labelMappingScan.pageSize }}
+            timeBudget: {{ default "30s" .Values.periodic.tasks.labelMappingScan.timeBudget | quote }}
           {{ end }}
         {{ end }}
     {{ if (default dict .Values.dev).tracing }}

@@ -103,8 +103,8 @@ service:
 #     labelMappingScan:
 #       schedule:
 #         interval: 2m
-#       pageSize: 100
-#       timeBudget: 10s
+#       pageSize: 1000
+#       timeBudget: 30s
 
 grafana:
   oauth:

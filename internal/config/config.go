@@ -817,9 +817,9 @@ const DefaultLabelMappingScanTaskInterval = 2 * time.Minute
 
 const (
 	// DefaultLabelMappingScanPageSize is the device page size used when unset.
-	DefaultLabelMappingScanPageSize = 100
+	DefaultLabelMappingScanPageSize = 1000
 	// DefaultLabelMappingScanTimeBudget is the per-invocation work budget when unset.
-	DefaultLabelMappingScanTimeBudget = 10 * time.Second
+	DefaultLabelMappingScanTimeBudget = 30 * time.Second
 	// MaxLabelMappingScanPageSize matches the device-list API maximum.
 	MaxLabelMappingScanPageSize = 1000
 )
