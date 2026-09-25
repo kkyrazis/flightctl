@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/flightctl/flightctl/internal/config"
 	"github.com/flightctl/flightctl/internal/domain"
 	"github.com/flightctl/flightctl/internal/flterrors"
 	checkpointservice "github.com/flightctl/flightctl/internal/service/checkpoint"
@@ -21,11 +22,11 @@ import (
 const (
 	mappingScanCheckpointConsumer = "label-sync-mapping-scan"
 	mappingScanCheckpointVersion  = 1
-	maxMappingScanPageSize        = 1000
+	maxMappingScanPageSize        = config.MaxLabelMappingScanPageSize
 )
 
-// MappingScanConfig bounds the amount of device work performed by one poll.
-type MappingScanConfig struct {
+// LabelMappingScanConfig bounds the amount of device work performed by one poll.
+type LabelMappingScanConfig struct {
 	PageSize   int
 	TimeBudget time.Duration
 }
@@ -49,23 +50,23 @@ type mappingScanProgress struct {
 	Failed bool                                     `json:"failed,omitempty"`
 }
 
-// MappingScanTask runs a resumable device-label mapping scan for one org.
-type MappingScanTask struct {
+// LabelMappingScanTask runs a resumable device-label mapping scan for one org.
+type LabelMappingScanTask struct {
 	log         logrus.FieldLogger
 	reconciler  mappingScanReconciler
 	deviceSvc   deviceservice.Service
 	checkpoints checkpointservice.Service
-	config      MappingScanConfig
+	config      LabelMappingScanConfig
 	now         func() time.Time
 }
 
-func NewMappingScanTask(
+func NewLabelMappingScanTask(
 	reconciler mappingScanReconciler,
 	deviceSvc deviceservice.Service,
 	checkpoints checkpointservice.Service,
-	config MappingScanConfig,
+	config LabelMappingScanConfig,
 	log logrus.FieldLogger,
-) (*MappingScanTask, error) {
+) (*LabelMappingScanTask, error) {
 	if reconciler == nil || deviceSvc == nil || checkpoints == nil {
 		return nil, errors.New("mapping scan task requires a reconciler, device service, and checkpoint service")
 	}
@@ -78,7 +79,7 @@ func NewMappingScanTask(
 	if log == nil {
 		log = logrus.New()
 	}
-	return &MappingScanTask{
+	return &LabelMappingScanTask{
 		log:         log,
 		reconciler:  reconciler,
 		deviceSvc:   deviceSvc,
@@ -89,7 +90,7 @@ func NewMappingScanTask(
 }
 
 // Poll advances one organization's mapping scan by whole device pages.
-func (t *MappingScanTask) Poll(ctx context.Context, orgID uuid.UUID) {
+func (t *LabelMappingScanTask) Poll(ctx context.Context, orgID uuid.UUID) {
 	targets, err := t.reconciler.ListMappingScanTargets(ctx, orgID)
 	if err != nil {
 		t.log.WithError(err).WithField("orgID", orgID).Error("Failed to list mapping scan targets")
@@ -167,7 +168,7 @@ func (t *MappingScanTask) Poll(ctx context.Context, orgID uuid.UUID) {
 	}
 }
 
-func (t *MappingScanTask) listDevicePage(ctx context.Context, orgID uuid.UUID, cursor *string) (*domain.DeviceList, bool) {
+func (t *LabelMappingScanTask) listDevicePage(ctx context.Context, orgID uuid.UUID, cursor *string) (*domain.DeviceList, bool) {
 	limit := int32(t.config.PageSize)
 	devices, status := t.deviceSvc.ListDevices(ctx, orgID, domain.ListDevicesParams{
 		Limit:    &limit,
@@ -180,7 +181,7 @@ func (t *MappingScanTask) listDevicePage(ctx context.Context, orgID uuid.UUID, c
 	return devices, true
 }
 
-func (t *MappingScanTask) processDevicePage(ctx context.Context, orgID uuid.UUID, checkpoint *mappingScanCheckpoint, devices *domain.DeviceList) (bool, error) {
+func (t *LabelMappingScanTask) processDevicePage(ctx context.Context, orgID uuid.UUID, checkpoint *mappingScanCheckpoint, devices *domain.DeviceList) (bool, error) {
 	retryPage := false
 	for _, device := range devices.Items {
 		if err := ctx.Err(); err != nil {
@@ -201,7 +202,7 @@ func (t *MappingScanTask) processDevicePage(ctx context.Context, orgID uuid.UUID
 	return retryPage, nil
 }
 
-func (t *MappingScanTask) recordDeviceOutcomes(
+func (t *LabelMappingScanTask) recordDeviceOutcomes(
 	ctx context.Context,
 	orgID uuid.UUID,
 	checkpoint *mappingScanCheckpoint,
@@ -254,7 +255,7 @@ func (t *MappingScanTask) recordDeviceOutcomes(
 	return nil
 }
 
-func (t *MappingScanTask) completeCampaign(ctx context.Context, orgID uuid.UUID, checkpoint mappingScanCheckpoint) {
+func (t *LabelMappingScanTask) completeCampaign(ctx context.Context, orgID uuid.UUID, checkpoint mappingScanCheckpoint) {
 	tokens := make([]labelsyncmappingservice.MappingScanToken, 0, len(checkpoint.Mappings))
 	for _, progress := range checkpoint.Mappings {
 		if !progress.Failed {
@@ -276,7 +277,7 @@ func (t *MappingScanTask) completeCampaign(ctx context.Context, orgID uuid.UUID,
 	t.persistIdleCheckpoint(ctx, orgID)
 }
 
-func (t *MappingScanTask) loadCheckpoint(ctx context.Context, orgID uuid.UUID) (mappingScanCheckpoint, bool, bool, error) {
+func (t *LabelMappingScanTask) loadCheckpoint(ctx context.Context, orgID uuid.UUID) (mappingScanCheckpoint, bool, bool, error) {
 	data, status := t.checkpoints.GetCheckpoint(ctx, mappingScanCheckpointConsumer, orgID.String())
 	if status.Code == http.StatusNotFound {
 		return mappingScanCheckpoint{}, false, true, nil
@@ -351,7 +352,7 @@ func mappingScanTokensMatch(left, right labelsyncmappingservice.MappingScanToken
 	return *left.DeletionRevision == *right.DeletionRevision
 }
 
-func (t *MappingScanTask) persistCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoint mappingScanCheckpoint) error {
+func (t *LabelMappingScanTask) persistCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoint mappingScanCheckpoint) error {
 	data, err := json.Marshal(checkpoint)
 	if err != nil {
 		return err
@@ -363,7 +364,7 @@ func (t *MappingScanTask) persistCheckpoint(ctx context.Context, orgID uuid.UUID
 	return nil
 }
 
-func (t *MappingScanTask) persistIdleCheckpoint(ctx context.Context, orgID uuid.UUID) {
+func (t *LabelMappingScanTask) persistIdleCheckpoint(ctx context.Context, orgID uuid.UUID) {
 	if err := t.persistCheckpoint(ctx, orgID, mappingScanCheckpoint{Version: mappingScanCheckpointVersion, Mappings: []mappingScanProgress{}}); err != nil {
 		t.log.WithError(err).WithField("orgID", orgID).Error("Failed to clear mapping scan checkpoint")
 	}

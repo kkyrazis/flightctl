@@ -768,6 +768,12 @@ type periodicTaskConfig struct {
 	Schedule periodicTaskScheduleConfig `json:"schedule,omitempty"`
 }
 
+type periodicLabelMappingScanTaskConfig struct {
+	Schedule   periodicTaskScheduleConfig `json:"schedule,omitempty"`
+	PageSize   *int                       `json:"pageSize,omitempty"`
+	TimeBudget *util.Duration             `json:"timeBudget,omitempty"`
+}
+
 type periodicTasksConfig struct {
 	ResourceSync periodicTaskConfig `json:"resourceSync,omitempty"`
 	// DependencySync overrides the interval for both the dependency-sync-git and
@@ -775,7 +781,8 @@ type periodicTasksConfig struct {
 	DependencySync periodicTaskConfig `json:"dependencySync,omitempty"`
 	// RepositoryTester overrides the interval for the repository-tester periodic task,
 	// which probes Repository resources and sets their Accessible condition.
-	RepositoryTester periodicTaskConfig `json:"repositoryTester,omitempty"`
+	RepositoryTester periodicTaskConfig                 `json:"repositoryTester,omitempty"`
+	LabelMappingScan periodicLabelMappingScanTaskConfig `json:"labelMappingScan,omitempty"`
 }
 
 type periodicConfig struct {
@@ -804,6 +811,18 @@ const DefaultDependenciesSyncPollInterval = 15 * time.Minute
 // newly added refs are discovered quickly and partial failures are retried
 // within minutes rather than waiting for the full poll interval.
 const DefaultDependencySyncTaskInterval = 3 * time.Minute
+
+// DefaultLabelMappingScanTaskInterval controls how often mapping scans run.
+const DefaultLabelMappingScanTaskInterval = 2 * time.Minute
+
+const (
+	// DefaultLabelMappingScanPageSize is the device page size used when unset.
+	DefaultLabelMappingScanPageSize = 100
+	// DefaultLabelMappingScanTimeBudget is the per-invocation work budget when unset.
+	DefaultLabelMappingScanTimeBudget = 10 * time.Second
+	// MaxLabelMappingScanPageSize matches the device-list API maximum.
+	MaxLabelMappingScanPageSize = 1000
+)
 
 // GetDependenciesSyncPollInterval returns the configured poll interval, or the default if unset.
 func (c *Config) GetDependenciesSyncPollInterval() time.Duration {
@@ -1735,6 +1754,9 @@ func Validate(cfg *Config) error {
 	if err := validateImageBuilderWorker(cfg.ImageBuilderWorker); err != nil {
 		return err
 	}
+	if err := validatePeriodicLabelMappingScanTask(cfg); err != nil {
+		return err
+	}
 
 	if err := validateDeltaGeneration(cfg); err != nil {
 		return err
@@ -1754,6 +1776,20 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validatePeriodicLabelMappingScanTask(cfg *Config) error {
+	if cfg.Periodic == nil {
+		return nil
+	}
+	settings := cfg.Periodic.Tasks.LabelMappingScan
+	if settings.PageSize != nil && (*settings.PageSize < 1 || *settings.PageSize > MaxLabelMappingScanPageSize) {
+		return fmt.Errorf("periodic.tasks.labelMappingScan.pageSize must be between 1 and %d", MaxLabelMappingScanPageSize)
+	}
+	if settings.TimeBudget != nil && time.Duration(*settings.TimeBudget) <= 0 {
+		return fmt.Errorf("periodic.tasks.labelMappingScan.timeBudget must be greater than 0")
+	}
 	return nil
 }
 

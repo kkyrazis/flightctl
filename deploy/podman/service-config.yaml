@@ -97,6 +97,15 @@ service:
     authWindow: 1h
     trustedProxies: []
 
+# Optional periodic task configuration. Uncomment to override task defaults.
+# periodic:
+#   tasks:
+#     labelMappingScan:
+#       schedule:
+#         interval: 2m
+#       pageSize: 100
+#       timeBudget: 10s
+
 grafana:
   oauth:
     enabled:

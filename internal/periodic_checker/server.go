@@ -25,6 +25,7 @@ import (
 	eventservice "github.com/flightctl/flightctl/internal/service/event"
 	"github.com/flightctl/flightctl/internal/service/events"
 	fleetservice "github.com/flightctl/flightctl/internal/service/fleet"
+	labelsyncmappingservice "github.com/flightctl/flightctl/internal/service/labelsyncmapping"
 	organizationservice "github.com/flightctl/flightctl/internal/service/organization"
 	repositoryservice "github.com/flightctl/flightctl/internal/service/repository"
 	resourcesyncservice "github.com/flightctl/flightctl/internal/service/resourcesync"
@@ -37,6 +38,7 @@ import (
 	devicestore "github.com/flightctl/flightctl/internal/store/device"
 	eventstore "github.com/flightctl/flightctl/internal/store/event"
 	fleetstore "github.com/flightctl/flightctl/internal/store/fleet"
+	labelsyncmappingstore "github.com/flightctl/flightctl/internal/store/labelsyncmapping"
 	organizationstore "github.com/flightctl/flightctl/internal/store/organization"
 	repositorystore "github.com/flightctl/flightctl/internal/store/repository"
 	resourcesyncstore "github.com/flightctl/flightctl/internal/store/resourcesync"
@@ -127,6 +129,19 @@ func (s *Server) Run(ctx context.Context) error {
 	vulnerabilityFindingStore := vulnerabilityfindingstore.NewVulnerabilityFindingStore(s.db, s.log.WithField("pkg", "vulnerabilityfinding-store"))
 
 	eventsSvc := events.NewServiceHandler(eventStore, workerClient, s.log)
+	labelSyncMappingEvaluator, err := labelsyncmappingservice.NewEvaluator()
+	if err != nil {
+		return fmt.Errorf("create label-sync mapping evaluator: %w", err)
+	}
+	labelSyncMappingReconciler, err := labelsyncmappingservice.NewReconciler(
+		labelsyncmappingstore.NewReconciliationStore(s.db, s.log.WithField("pkg", "labelsyncmapping-store")),
+		labelSyncMappingEvaluator,
+		eventsSvc,
+		s.log.WithField("pkg", "device-label-reconciliation"),
+	)
+	if err != nil {
+		return fmt.Errorf("create label-sync mapping reconciler: %w", err)
+	}
 
 	repositorySvc := repositoryservice.WrapWithTracing(repositoryservice.NewServiceHandler(repositoryStore, eventsSvc, s.log))
 	fleetSvc := fleetservice.WrapWithTracing(fleetservice.NewServiceHandler(fleetStore, catalogStore, eventsSvc, s.log))
@@ -179,7 +194,7 @@ func (s *Server) Run(ctx context.Context) error {
 	deltaPrepareSvc := deltaprepare.WrapWithTracing(deltaprepare.NewServiceHandler(deltaPrepareStore, nil))
 	periodicTaskExecutors := InitializeTaskExecutors(s.log,
 		repositorySvc, fleetSvc, resourceSyncSvc, catalogSvc, deviceSvc, eventSvc,
-		checkpointSvc, organizationSvc, dependencyrefSvc, syncstateSvc,
+		checkpointSvc, labelSyncMappingReconciler, organizationSvc, dependencyrefSvc, syncstateSvc,
 		s.cfg, queuesProvider, workerClient, nil, findingSvc, scanner, depSyncMetrics, deltaPrepareStore, deltaPrepareSvc, tvSvc)
 
 	// Create channel manager for task distribution

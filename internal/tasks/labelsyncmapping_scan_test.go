@@ -86,21 +86,21 @@ func newMappingScanCheckpointMock(ctrl *gomock.Controller, orgID uuid.UUID, init
 func TestNewMappingScanTaskRejectsInvalidConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		config MappingScanConfig
+		config LabelMappingScanConfig
 	}{
-		{name: "When page size is zero it should be rejected", config: MappingScanConfig{PageSize: 0, TimeBudget: time.Second}},
-		{name: "When page size exceeds the device list maximum it should be rejected", config: MappingScanConfig{PageSize: 1001, TimeBudget: time.Second}},
-		{name: "When time budget is non-positive it should be rejected", config: MappingScanConfig{PageSize: 100, TimeBudget: 0}},
+		{name: "When page size is zero it should be rejected", config: LabelMappingScanConfig{PageSize: 0, TimeBudget: time.Second}},
+		{name: "When page size exceeds the device list maximum it should be rejected", config: LabelMappingScanConfig{PageSize: 1001, TimeBudget: time.Second}},
+		{name: "When time budget is non-positive it should be rejected", config: LabelMappingScanConfig{PageSize: 100, TimeBudget: 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
-			_, err := NewMappingScanTask(&mappingScanReconcilerStub{}, deviceservice.NewMockService(ctrl), checkpointservice.NewMockService(ctrl), tc.config, logrus.New())
+			_, err := NewLabelMappingScanTask(&mappingScanReconcilerStub{}, deviceservice.NewMockService(ctrl), checkpointservice.NewMockService(ctrl), tc.config, logrus.New())
 			require.Error(t, err)
 		})
 	}
 	t.Run("When page size is at the maximum it should be accepted", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
-		_, err := NewMappingScanTask(&mappingScanReconcilerStub{}, deviceservice.NewMockService(ctrl), checkpointservice.NewMockService(ctrl), MappingScanConfig{PageSize: maxMappingScanPageSize, TimeBudget: time.Second}, logrus.New())
+		_, err := NewLabelMappingScanTask(&mappingScanReconcilerStub{}, deviceservice.NewMockService(ctrl), checkpointservice.NewMockService(ctrl), LabelMappingScanConfig{PageSize: maxMappingScanPageSize, TimeBudget: time.Second}, logrus.New())
 		require.NoError(t, err)
 	})
 }
@@ -112,7 +112,7 @@ func TestMappingScanTaskSkipsDeviceScanWhenNoTargets(t *testing.T) {
 	deviceSvc := deviceservice.NewMockService(ctrl)
 	reconciler := &mappingScanReconcilerStub{}
 	checkpoints, checkpointHarness := newMappingScanCheckpointMock(ctrl, orgID, nil)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
 	require.NoError(t, err)
 
 	task.Poll(ctx, orgID)
@@ -153,7 +153,7 @@ func TestMappingScanTaskResumesCursorAndCompletesOnlyAfterFinalPage(t *testing.T
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-2")}}, domain.StatusOK()
 		},
 	)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
 	require.NoError(t, err)
 	start := time.Now()
 	now := start
@@ -218,7 +218,7 @@ func TestMappingScanTaskRetriesDeviceFailureFromTheSameCursor(t *testing.T) {
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-2")}}, domain.StatusOK()
 		},
 	).Times(2)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
 	require.NoError(t, err)
 
 	task.Poll(ctx, orgID)
@@ -257,7 +257,7 @@ func TestMappingScanTaskKeepsFailuresIsolatedFromSuccessfulMappings(t *testing.T
 	deviceSvc := deviceservice.NewMockService(ctrl)
 	deviceSvc.EXPECT().ListDevices(gomock.Any(), orgID, gomock.Any(), gomock.Nil()).Return(
 		&domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-1")}}, domain.StatusOK())
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
 	require.NoError(t, err)
 	task.Poll(ctx, orgID)
 
@@ -284,7 +284,7 @@ func TestMappingScanTaskDuplicatePollsRemainIdempotent(t *testing.T) {
 	deviceSvc := deviceservice.NewMockService(ctrl)
 	deviceSvc.EXPECT().ListDevices(gomock.Any(), orgID, gomock.Any(), gomock.Nil()).Return(
 		&domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-1")}}, domain.StatusOK()).Times(2)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
 	require.NoError(t, err)
 
 	task.Poll(ctx, orgID)
@@ -331,7 +331,7 @@ func TestMappingScanTaskRestartsOnlyTheMappingWithAChangedToken(t *testing.T) {
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-3")}}, domain.StatusOK()
 		},
 	)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Second}, logrus.New())
 	require.NoError(t, err)
 	start := time.Now()
 	clockCalls := 0
@@ -399,7 +399,7 @@ func TestMappingScanTaskRetriesDeviceFailureAfterDroppingAStaleMappingToken(t *t
 			return &domain.DeviceList{Items: []domain.Device{mappingScanTestDevice("device-1")}}, domain.StatusOK()
 		},
 	)
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
 	require.NoError(t, err)
 
 	task.Poll(ctx, orgID)
@@ -441,7 +441,7 @@ func TestMappingScanTaskRestartsWhenCheckpointVersionIsUnsupported(t *testing.T)
 		reconcileErr:     map[string]error{},
 		completeResults:  map[uuid.UUID]bool{mappingID: true},
 	}
-	task, err := NewMappingScanTask(reconciler, deviceSvc, checkpoints, MappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
+	task, err := NewLabelMappingScanTask(reconciler, deviceSvc, checkpoints, LabelMappingScanConfig{PageSize: 100, TimeBudget: time.Minute}, logrus.New())
 	require.NoError(t, err)
 
 	task.Poll(ctx, orgID)
