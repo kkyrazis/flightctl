@@ -270,3 +270,40 @@ func sameDeviceLabelOwner(left, right *uuid.UUID) bool {
 	}
 	return *left == *right
 }
+
+func (s *DeviceStore) rejectManagedLabelChanges(ctx context.Context, orgID uuid.UUID, deviceName string, before, after map[string]string) error {
+	changedKeys := changedDeviceLabelKeys(before, after)
+	if len(changedKeys) == 0 {
+		return nil
+	}
+	var ownedCount int64
+	if err := s.getDB(ctx).Model(&model.DeviceLabel{}).
+		Where("org_id = ? AND device_name = ? AND label_key IN ? AND label_sync_mapping_id IS NOT NULL", orgID, deviceName, changedKeys).
+		Count(&ownedCount).Error; err != nil {
+		return store.ErrorFromGormError(err)
+	}
+	if ownedCount > 0 {
+		return flterrors.ErrManagedLabelConflict
+	}
+	return nil
+}
+
+func changedDeviceLabelKeys(before, after map[string]string) []string {
+	keys := make(map[string]struct{}, len(before)+len(after))
+	for key := range before {
+		keys[key] = struct{}{}
+	}
+	for key := range after {
+		keys[key] = struct{}{}
+	}
+	changed := make([]string, 0, len(keys))
+	for key := range keys {
+		beforeValue, beforeExists := before[key]
+		afterValue, afterExists := after[key]
+		if beforeExists != afterExists || beforeValue != afterValue {
+			changed = append(changed, key)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}

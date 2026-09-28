@@ -814,6 +814,9 @@ func (s *DeviceStore) Update(ctx context.Context, orgId uuid.UUID, before, devic
 		updates["render_timestamp"] = time.Now()
 	}
 
+	if err := s.rejectManagedLabelChanges(ctx, orgId, existing.Name, map[string]string(existing.Labels), map[string]string(fromAPI.Labels)); err != nil {
+		return false, err
+	}
 	result := s.getDB(ctx).Model(existing).Where("resource_version = ?", lo.FromPtr(existing.ResourceVersion)).Updates(updates)
 	if result.Error != nil {
 		err := store.ErrorFromGormError(result.Error)
