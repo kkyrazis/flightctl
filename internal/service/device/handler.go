@@ -131,7 +131,16 @@ func convertDeviceListParams(params domain.ListDevicesParams, annotationSelector
 	}, domain.StatusOK()
 }
 
+// ListDeviceIdentities pages device identities for internal scans using the ordinary listing cursor.
+func (h *DeviceServiceHandler) ListDeviceIdentities(ctx context.Context, orgID uuid.UUID, limit int32, continueToken *string) (*domain.DeviceList, domain.Status) {
+	return h.listDevices(ctx, orgID, domain.ListDevicesParams{Limit: &limit, Continue: continueToken}, nil, true)
+}
+
 func (h *DeviceServiceHandler) ListDevices(ctx context.Context, orgId uuid.UUID, params domain.ListDevicesParams, annotationSelector *selector.AnnotationSelector) (*domain.DeviceList, domain.Status) {
+	return h.listDevices(ctx, orgId, params, annotationSelector, false)
+}
+
+func (h *DeviceServiceHandler) listDevices(ctx context.Context, orgId uuid.UUID, params domain.ListDevicesParams, annotationSelector *selector.AnnotationSelector, identityOnly bool) (*domain.DeviceList, domain.Status) {
 	storeParams, status := convertDeviceListParams(params, annotationSelector)
 	if status.Code != http.StatusOK {
 		return nil, status
@@ -165,6 +174,7 @@ func (h *DeviceServiceHandler) ListDevices(ctx context.Context, orgId uuid.UUID,
 		return nil, domain.StatusBadRequest("limit cannot be negative")
 	}
 
+	storeParams.IdentityOnly = identityOnly
 	result, err := h.deviceStore.List(ctx, orgId, *storeParams)
 	if err == nil {
 		return result, domain.StatusOK()

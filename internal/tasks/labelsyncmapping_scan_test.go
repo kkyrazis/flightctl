@@ -201,9 +201,9 @@ func expectFailureCheck(t *testing.T, devices *deviceservice.MockService, orgID 
 }
 func expectFullPage(t *testing.T, devices *deviceservice.MockService, orgID uuid.UUID, after *string, names []string, next *string) {
 	t.Helper()
-	devices.EXPECT().ListDevices(gomock.Any(), orgID, gomock.Any(), gomock.Nil()).DoAndReturn(func(_ context.Context, _ uuid.UUID, params domain.ListDevicesParams, _ any) (*domain.DeviceList, domain.Status) {
-		require.Equal(t, after, params.Continue)
-		require.EqualValues(t, 1, lo.FromPtr(params.Limit))
+	devices.EXPECT().ListDeviceIdentities(gomock.Any(), orgID, int32(1), gomock.Any()).DoAndReturn(func(_ context.Context, _ uuid.UUID, limit int32, cursor *string) (*domain.DeviceList, domain.Status) {
+		require.Equal(t, after, cursor)
+		require.EqualValues(t, 1, limit)
 		page := &domain.DeviceList{Metadata: domain.ListMeta{Continue: next}}
 		for _, name := range names {
 			page.Items = append(page.Items, mappingScanTestDevice(name))
@@ -413,7 +413,7 @@ func TestMappingScanInfrastructureErrors(t *testing.T) {
 			case "checkpoint load":
 				harness.getStatus = domain.StatusInternalServerError("database unavailable")
 			case "device listing":
-				devices.EXPECT().ListDevices(gomock.Any(), orgID, gomock.Any(), gomock.Nil()).Return(nil, domain.StatusInternalServerError("database unavailable"))
+				devices.EXPECT().ListDeviceIdentities(gomock.Any(), orgID, int32(1), gomock.Any()).Return(nil, domain.StatusInternalServerError("database unavailable"))
 			case "checkpoint write":
 				harness.setStatus = domain.StatusInternalServerError("database unavailable")
 				expectFullPage(t, devices, orgID, nil, []string{"a"}, store.BuildContinueString([]string{"a"}, 1))

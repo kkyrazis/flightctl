@@ -49,7 +49,8 @@ func (d DeviceStatusType) Validate() error {
 // DeviceListParams extends store.ListParams with device-specific filter options.
 type DeviceListParams struct {
 	store.ListParams
-	CveID *string // Filter devices by CVE ID (join vulnerability_findings; selectors use devices.*)
+	CveID        *string // Filter devices by CVE ID (join vulnerability_findings; selectors use devices.*)
+	IdentityOnly bool    // Project device identity and pagination columns for internal scans.
 }
 
 type Store interface {
@@ -635,7 +636,8 @@ func (s *DeviceStore) createDeviceLabelsTrigger(db *gorm.DB) error {
 				INSERT INTO device_labels (org_id, device_name, label_key, label_value)
 				VALUES (NEW.org_id, NEW.name, label.key, label.value)
 				ON CONFLICT (org_id, device_name, label_key) DO UPDATE
-				SET label_value = EXCLUDED.label_value;
+				SET label_value = EXCLUDED.label_value
+				WHERE device_labels.label_value IS DISTINCT FROM EXCLUDED.label_value;
 			END LOOP;
 
 			RETURN NEW;
@@ -1080,6 +1082,10 @@ func (s *DeviceStore) List(ctx context.Context, orgId uuid.UUID, listParams Devi
 		query = store.AddPaginationToQuery(query, listParams.Limit+1, listParams.Continue, listParams.ListParams)
 	}
 
+	if listParams.IdentityOnly {
+		query = query.Select("name", "created_at")
+	}
+
 	// Execute query
 	result := query.Find(&devices)
 	if result.Error != nil {
@@ -1121,6 +1127,16 @@ func (s *DeviceStore) List(ctx context.Context, orgId uuid.UUID, listParams Devi
 		numRemaining = &numRemainingVal
 	}
 
+	if listParams.IdentityOnly {
+		items := make([]domain.Device, len(devices))
+		for i := range devices {
+			items[i].Metadata = domain.ObjectMeta{Name: lo.ToPtr(devices[i].Name), CreationTimestamp: lo.ToPtr(devices[i].CreatedAt.UTC())}
+		}
+		return &domain.DeviceList{
+			ApiVersion: model.DeviceAPIVersion(), Kind: domain.DeviceListKind, Items: items,
+			Metadata: domain.ListMeta{Continue: nextContinue, RemainingItemCount: numRemaining},
+		}, nil
+	}
 	ret, err := model.DevicesToApiResource(devices, nextContinue, numRemaining)
 	if err != nil {
 		return nil, err

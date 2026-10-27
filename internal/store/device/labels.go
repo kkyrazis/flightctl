@@ -111,18 +111,19 @@ func (s *DeviceStore) ApplyLabels(ctx context.Context, orgID uuid.UUID, name str
 		return plan.result, nil
 	}
 
-	err = store.RunInTransaction(ctx, s.dbHandler, func(tx *gorm.DB) error {
-		if !changed {
-			// Confirm no-op observations without rewriting the device.
-			var current model.Device
-			err := tx.Select("resource_version").Where("org_id = ? AND name = ? AND resource_version = ?", orgID, name, plan.resourceVersion).Take(&current).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return flterrors.ErrResourceVersionConflict
-			}
-			return store.ErrorFromGormError(err)
+	if !changed {
+		// A single read fences no-op observations and joins any caller-owned transaction.
+		var current model.Device
+		err = s.getDB(ctx).Select("resource_version").Where("org_id = ? AND name = ? AND resource_version = ?", orgID, name, plan.resourceVersion).Take(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.DeviceLabelApplyResult{}, flterrors.ErrResourceVersionConflict
 		}
-		return s.applyLabelsInTransaction(tx, orgID, name, snapshot, desired, plan)
-	})
+		err = store.ErrorFromGormError(err)
+	} else {
+		err = store.RunInTransaction(ctx, s.dbHandler, func(tx *gorm.DB) error {
+			return s.applyLabelsInTransaction(tx, orgID, name, snapshot, desired, plan)
+		})
+	}
 	if err != nil {
 		return domain.DeviceLabelApplyResult{}, err
 	}
@@ -283,7 +284,18 @@ func updateDeviceLabels(tx *gorm.DB, orgID uuid.UUID, name string, resourceVersi
 }
 
 func updateDeviceLabelOwners(tx *gorm.DB, orgID uuid.UUID, name string, currentRowsByKey map[string]domain.DeviceLabelOwnership, desired map[string]domain.DesiredDeviceLabel) error {
-	for key, label := range desired {
+	var cases strings.Builder
+	cases.WriteString("CASE label_key")
+	var values []interface{}
+	predicates := tx.Session(&gorm.Session{NewDB: true})
+	var count int64
+	keys := make([]string, 0, len(desired))
+	for key := range desired {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		label := desired[key]
 		previous, exists := currentRowsByKey[key]
 		if exists && sameDeviceLabelOwner(previous.MappingID, label.MappingID) {
 			continue
@@ -292,20 +304,24 @@ func updateDeviceLabelOwners(tx *gorm.DB, orgID uuid.UUID, name string, currentR
 			continue
 		}
 
-		write := tx.Model(&model.DeviceLabel{}).
-			Where("org_id = ? AND device_name = ? AND label_key = ? AND label_value = ?", orgID, name, key, label.Value)
-		if previous.MappingID == nil {
-			write = write.Where("label_sync_mapping_id IS NULL")
-		} else {
-			write = write.Where("label_sync_mapping_id = ?", *previous.MappingID)
-		}
-		write = write.Update("label_sync_mapping_id", label.MappingID)
-		if write.Error != nil {
-			return store.ErrorFromGormError(write.Error)
-		}
-		if write.RowsAffected != 1 {
-			return flterrors.ErrResourceVersionConflict
-		}
+		cases.WriteString(" WHEN ? THEN ?::uuid")
+		values = append(values, key, label.MappingID)
+		predicates = predicates.Or("(label_key = ? AND label_value = ? AND label_sync_mapping_id IS NOT DISTINCT FROM ?::uuid)", key, label.Value, previous.MappingID)
+		count++
+	}
+	if count == 0 {
+		return nil
+	}
+	cases.WriteString(" END")
+	write := tx.Model(&model.DeviceLabel{}).
+		Where("org_id = ? AND device_name = ?", orgID, name).
+		Where(predicates).
+		Update("label_sync_mapping_id", gorm.Expr(cases.String(), values...))
+	if write.Error != nil {
+		return store.ErrorFromGormError(write.Error)
+	}
+	if write.RowsAffected != count {
+		return flterrors.ErrResourceVersionConflict
 	}
 	return nil
 }

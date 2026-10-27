@@ -117,7 +117,7 @@ func (t *LabelMappingScanTask) poll(ctx context.Context, orgID uuid.UUID) error 
 			}
 			break
 		}
-		devices, status := t.deviceSvc.ListDevices(ctx, orgID, domain.ListDevicesParams{Limit: lo.ToPtr(int32(t.config.PageSize)), Continue: cloneString(checkpoint.Cursor)}, nil)
+		devices, status := t.deviceSvc.ListDeviceIdentities(ctx, orgID, int32(t.config.PageSize), cloneString(checkpoint.Cursor))
 		if status.Code >= http.StatusBadRequest {
 			return fmt.Errorf("device listing returned %d: %s", status.Code, status.Message)
 		}

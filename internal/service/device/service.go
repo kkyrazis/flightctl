@@ -13,6 +13,7 @@ import (
 type Service interface {
 	CreateDevice(ctx context.Context, orgId uuid.UUID, device domain.Device) (*domain.Device, domain.Status)
 	ListDevices(ctx context.Context, orgId uuid.UUID, params domain.ListDevicesParams, annotationSelector *selector.AnnotationSelector) (*domain.DeviceList, domain.Status)
+	ListDeviceIdentities(ctx context.Context, orgID uuid.UUID, limit int32, continueToken *string) (*domain.DeviceList, domain.Status)
 	ListDevicesByServiceCondition(ctx context.Context, orgId uuid.UUID, conditionType string, conditionStatus string, listParams store.ListParams) (*domain.DeviceList, domain.Status)
 	UpdateDevice(ctx context.Context, orgId uuid.UUID, name string, device domain.Device, fieldsToUnset []string) (*domain.Device, error)
 	GetDevice(ctx context.Context, orgId uuid.UUID, name string) (*domain.Device, domain.Status)

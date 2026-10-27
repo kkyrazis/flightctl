@@ -13,6 +13,7 @@ import (
 	"github.com/flightctl/flightctl/internal/config"
 	"github.com/flightctl/flightctl/internal/domain"
 	"github.com/flightctl/flightctl/internal/flterrors"
+	deviceservice "github.com/flightctl/flightctl/internal/service/device"
 	labelsyncmappingservice "github.com/flightctl/flightctl/internal/service/labelsyncmapping"
 	"github.com/flightctl/flightctl/internal/store"
 	devicestore "github.com/flightctl/flightctl/internal/store/device"
@@ -152,6 +153,28 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		GinkgoWriter.Printf("condition query plan:\n%s\n", strings.Join(plan, "\n"))
 	})
 
+	It("When a caller owns the transaction it should validate no-op labels against its uncommitted resource version", func() {
+		_, err := deviceStore.Create(ctx, orgID, newLabelSyncDevice("transaction-noop", nil), nil)
+		Expect(err).NotTo(HaveOccurred())
+		snapshot, err := deviceStore.GetLabelSnapshot(ctx, orgID, "transaction-noop")
+		Expect(err).NotTo(HaveOccurred())
+		before := snapshot.Device
+		rollback := errors.New("rollback caller transaction")
+		err = store.WithTransaction(ctx, db, func(txCtx context.Context) error {
+			Expect(store.DB(txCtx, db).Model(&model.Device{}).Where("org_id = ? AND name = ?", orgID, "transaction-noop").UpdateColumn("resource_version", 2).Error).NotTo(HaveOccurred())
+			snapshot.Device.Metadata.ResourceVersion = lo.ToPtr("2")
+			condition := domain.Condition{Type: domain.ConditionTypeDeviceLabelsSynced, Status: domain.ConditionStatusTrue}
+			result, err := deviceStore.ApplyLabels(txCtx, orgID, "transaction-noop", snapshot, map[string]domain.DesiredDeviceLabel{}, &condition)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Device.Metadata.ResourceVersion).To(Equal(lo.ToPtr("2")))
+			return rollback
+		})
+		Expect(err).To(MatchError(rollback))
+		after, err := deviceStore.Get(ctx, orgID, "transaction-noop")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(&before))
+	})
+
 	It("When label ownership fails it should roll back labels and the reconciliation condition together", func() {
 		created, err := deviceStore.Create(ctx, orgID, newLabelSyncDevice("atomic-device", nil), nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -222,6 +245,84 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		queries = recorder.drain()
 		Expect(queries).To(HaveLen(6), strings.Join(queries, "\n"))
 		Expect(queries[5]).To(ContainSubstring(`SELECT "revision" FROM "label_sync_state"`))
+	})
+
+	for _, mismatch := range []string{"owner", "value"} {
+		It("When a batched ownership "+mismatch+" predicate fails it should roll back every assignment and device change", func() {
+			for _, name := range []string{"first", "second"} {
+				_, err := mappingStore.Create(ctx, orgID, mapLabelSyncMapping(name))
+				Expect(err).NotTo(HaveOccurred())
+			}
+			firstID, secondID := mappingID(ctx, db, orgID, "first"), mappingID(ctx, db, orgID, "second")
+			_, err := deviceStore.Create(ctx, orgID, newLabelSyncDevice("batch-rollback", nil), nil)
+			Expect(err).NotTo(HaveOccurred())
+			snapshot, err := deviceStore.GetLabelSnapshot(ctx, orgID, "batch-rollback")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = deviceStore.ApplyLabels(ctx, orgID, "batch-rollback", snapshot, map[string]domain.DesiredDeviceLabel{
+				"a": {Value: "one", MappingID: &firstID}, "b": {Value: "two", MappingID: &firstID},
+			}, nil)
+			Expect(err).NotTo(HaveOccurred())
+			snapshot, err = deviceStore.GetLabelSnapshot(ctx, orgID, "batch-rollback")
+			Expect(err).NotTo(HaveOccurred())
+			before := snapshot
+			desired := map[string]domain.DesiredDeviceLabel{
+				"a": {Value: "one", MappingID: &secondID}, "b": {Value: "two", MappingID: &secondID},
+			}
+			if mismatch == "owner" {
+				snapshot.Labels = append([]domain.DeviceLabelOwnership(nil), snapshot.Labels...)
+				snapshot.Labels[1].MappingID = lo.ToPtr(uuid.New())
+			} else {
+				snapshot.Device.Metadata.Labels = lo.ToPtr(map[string]string{"a": "one", "b": "mismatched"})
+				desired["b"] = domain.DesiredDeviceLabel{Value: "mismatched", MappingID: &secondID}
+			}
+			condition := domain.Condition{Type: domain.ConditionTypeDeviceLabelsSynced, Status: domain.ConditionStatusFalse, Reason: "Failed", Message: "test failure"}
+			_, err = deviceStore.ApplyLabels(ctx, orgID, "batch-rollback", snapshot, desired, &condition)
+			Expect(err).To(MatchError(flterrors.ErrResourceVersionConflict))
+			after, err := deviceStore.GetLabelSnapshot(ctx, orgID, "batch-rollback")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after).To(Equal(before))
+		})
+	}
+
+	It("When identities are paged it should preserve full-list cursors and organization and deletion filters", func() {
+		for _, targetOrg := range []uuid.UUID{orgID, otherOrgID} {
+			for _, name := range []string{"a", "b", "c", "deleted", "spec-less"} {
+				_, err := deviceStore.Create(ctx, targetOrg, newLabelSyncDevice(name, nil), nil)
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+		Expect(db.WithContext(ctx).Where("org_id = ? AND name = ?", orgID, "deleted").Delete(&model.Device{}).Error).NotTo(HaveOccurred())
+		Expect(db.WithContext(ctx).Model(&model.Device{}).Where("org_id = ? AND name = ?", orgID, "spec-less").Update("spec", nil).Error).NotTo(HaveOccurred())
+		recorder := &labelSyncQueryRecorder{Interface: db.Logger}
+		observedDevices := devicestore.NewDeviceStore(db.Session(&gorm.Session{Logger: recorder}), log)
+		service := deviceservice.NewDeviceServiceHandler(observedDevices, nil, nil, &recordingEvents{}, nil, "", log)
+		var cursor *string
+		var names []string
+		for {
+			full, fullStatus := service.ListDevices(ctx, orgID, domain.ListDevicesParams{Limit: lo.ToPtr(int32(1)), Continue: cursor}, nil)
+			Expect(fullStatus.Code).To(Equal(int32(200)), fullStatus.Message)
+			recorder.drain()
+			page, status := service.ListDeviceIdentities(ctx, orgID, 1, cursor)
+			Expect(status.Code).To(Equal(int32(200)), status.Message)
+			queries := recorder.drain()
+			Expect(queries).NotTo(BeEmpty())
+			Expect(queries[0]).To(ContainSubstring(`SELECT "name","created_at"`))
+			Expect(queries[0]).NotTo(ContainSubstring("rendered_"))
+			Expect(page.Metadata).To(Equal(full.Metadata))
+			Expect(page.Summary).To(BeNil())
+			Expect(page.Items).To(HaveLen(len(full.Items)))
+			for i, item := range page.Items {
+				Expect(item.Metadata.Name).To(Equal(full.Items[i].Metadata.Name))
+				Expect(item.Spec).To(BeNil())
+				Expect(item.Status).To(BeNil())
+				names = append(names, *item.Metadata.Name)
+			}
+			cursor = page.Metadata.Continue
+			if cursor == nil {
+				break
+			}
+		}
+		Expect(names).To(Equal([]string{"a", "b", "c"}))
 	})
 
 	It("When mapping state is loaded it should include current and terminating mappings with one revision", func() {

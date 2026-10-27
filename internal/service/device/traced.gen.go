@@ -183,6 +183,14 @@ func (_d *TracedDeviceService) ListConnectivityChangedDevices(ctx context.Contex
 	return dp1, s1
 }
 
+func (_d *TracedDeviceService) ListDeviceIdentities(ctx context.Context, orgID uuid.UUID, limit int32, continueToken *string) (dp1 *domain.DeviceList, s1 domain.Status) {
+	ctx, span := startSpan(ctx, "ListDeviceIdentities")
+
+	dp1, s1 = _d.inner.ListDeviceIdentities(ctx, orgID, limit, continueToken)
+	endSpan(span, s1)
+	return dp1, s1
+}
+
 func (_d *TracedDeviceService) ListDevices(ctx context.Context, orgId uuid.UUID, params domain.ListDevicesParams, annotationSelector *selector.AnnotationSelector) (dp1 *domain.DeviceList, s1 domain.Status) {
 	ctx, span := startSpan(ctx, "ListDevices")
 

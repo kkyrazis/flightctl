@@ -281,6 +281,21 @@ func (mr *MockServiceMockRecorder) ListConnectivityChangedDevices(ctx, orgId, pa
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListConnectivityChangedDevices", reflect.TypeOf((*MockService)(nil).ListConnectivityChangedDevices), ctx, orgId, params, cutoffTime)
 }
 
+// ListDeviceIdentities mocks base method.
+func (m *MockService) ListDeviceIdentities(ctx context.Context, orgID uuid.UUID, limit int32, continueToken *string) (*domain.DeviceList, domain.Status) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListDeviceIdentities", ctx, orgID, limit, continueToken)
+	ret0, _ := ret[0].(*domain.DeviceList)
+	ret1, _ := ret[1].(domain.Status)
+	return ret0, ret1
+}
+
+// ListDeviceIdentities indicates an expected call of ListDeviceIdentities.
+func (mr *MockServiceMockRecorder) ListDeviceIdentities(ctx, orgID, limit, continueToken any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDeviceIdentities", reflect.TypeOf((*MockService)(nil).ListDeviceIdentities), ctx, orgID, limit, continueToken)
+}
+
 // ListDevices mocks base method.
 func (m *MockService) ListDevices(ctx context.Context, orgId uuid.UUID, params domain.ListDevicesParams, annotationSelector *selector.AnnotationSelector) (*domain.DeviceList, domain.Status) {
 	m.ctrl.T.Helper()
