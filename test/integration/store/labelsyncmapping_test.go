@@ -243,8 +243,8 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.LabelsChanged).To(BeFalse())
 		queries = recorder.drain()
-		Expect(queries).To(HaveLen(6), strings.Join(queries, "\n"))
-		Expect(queries[5]).To(ContainSubstring(`SELECT "revision" FROM "label_sync_state"`))
+		Expect(queries).To(HaveLen(5), strings.Join(queries, "\n"))
+		Expect(queries[4]).To(ContainSubstring(`SELECT "revision" FROM "label_sync_state"`))
 	})
 
 	for _, mismatch := range []string{"owner", "value"} {
@@ -323,6 +323,76 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 			}
 		}
 		Expect(names).To(Equal([]string{"a", "b", "c"}))
+	})
+
+	It("When no mappings match it should retain the organization revision in a single snapshot read", func() {
+		recorder := &labelSyncQueryRecorder{Interface: db.Logger}
+		observed := labelsyncmappingstore.NewStore(db.Session(&gorm.Session{Logger: recorder}), log)
+		empty, err := observed.GetDeviceMappingsSnapshot(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(empty.Revision).To(BeZero())
+		Expect(empty.Mappings).To(Equal([]labelsyncmappingstore.DeviceMapping{}))
+		Expect(recorder.drain()).To(HaveLen(1))
+		_, err = mappingStore.Create(ctx, otherOrgID, newLabelSyncMapping("other-org", "other-org"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("removed", "removed"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.Delete(ctx, orgID, "removed")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mappingStore.FinalizeDelete(ctx, orgID, "removed")
+		Expect(err).NotTo(HaveOccurred())
+		empty, err = observed.GetDeviceMappingsSnapshot(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(empty.Revision).To(Equal(int64(3)))
+		Expect(empty.Mappings).To(Equal([]labelsyncmappingstore.DeviceMapping{}))
+		Expect(recorder.drain()).To(HaveLen(1))
+	})
+
+	It("When mapping definitions change concurrently it should read each definition with its committed revision", func() {
+		mapping := newLabelSyncMapping("concurrent-snapshot", "concurrent-snapshot")
+		mapping.Spec.Expression = "1"
+		_, err := mappingStore.Create(ctx, orgID, mapping)
+		Expect(err).NotTo(HaveOccurred())
+		writerCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		writerDone := make(chan error, 1)
+		go func() {
+			for revision := 2; revision <= 30; revision++ {
+				mapping.Spec.Expression = fmt.Sprint(revision)
+				if _, _, err := mappingStore.Update(writerCtx, orgID, mapping); err != nil {
+					writerDone <- err
+					return
+				}
+			}
+			writerDone <- nil
+		}()
+		defer func() { Expect(<-writerDone).To(Succeed()) }()
+		for i := 0; i < 40; i++ {
+			snapshot, err := mappingStore.GetDeviceMappingsSnapshot(writerCtx, orgID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshot.Mappings).To(HaveLen(1))
+			Expect(snapshot.Mappings[0].Mapping.Spec.Expression).To(Equal(fmt.Sprint(snapshot.Revision)))
+		}
+	})
+
+	It("When mapping metadata changes without a definition revision it should return current metadata", func() {
+		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("metadata", "metadata"))
+		Expect(err).NotTo(HaveOccurred())
+		before, err := mappingStore.GetDeviceMappingsSnapshot(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		mapping, err := mappingStore.Get(ctx, orgID, "metadata")
+		Expect(err).NotTo(HaveOccurred())
+		mapping.Metadata.Annotations = lo.ToPtr(map[string]string{"example.com/source": "updated"})
+		_, _, err = mappingStore.Update(ctx, orgID, mapping)
+		Expect(err).NotTo(HaveOccurred())
+		current, err := mappingStore.Get(ctx, orgID, "metadata")
+		Expect(err).NotTo(HaveOccurred())
+		after, err := mappingStore.GetDeviceMappingsSnapshot(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after.Revision).To(Equal(before.Revision))
+		Expect(after.Mappings).To(HaveLen(1))
+		Expect(after.Mappings[0].Mapping).To(Equal(*current))
+		Expect(after.Mappings[0].Mapping.Metadata.ResourceVersion).NotTo(Equal(before.Mappings[0].Mapping.Metadata.ResourceVersion))
 	})
 
 	It("When mapping state is loaded it should include current and terminating mappings with one revision", func() {

@@ -109,6 +109,7 @@ var _ = Describe("LabelSyncMapping performance measurements", Label("performance
 		operation()
 		samples.durations = append(samples.durations, time.Since(started))
 		for _, query := range recorder.drain() {
+			query = strings.TrimSpace(query)
 			switch {
 			case strings.HasPrefix(query, "SELECT"):
 				samples.Selects++
@@ -140,6 +141,8 @@ var _ = Describe("LabelSyncMapping performance measurements", Label("performance
 				Expect(revision).To(Equal(snapshot.Revision))
 			})
 		}
+		Expect(snapshots.Selects).To(Equal(labelSyncMeasurementRepetitions))
+		Expect(snapshots.Transactions).To(BeZero())
 		AddReportEntry("mapping-snapshot-json-bytes", definitionBytes)
 		AddReportEntry("mapping-snapshot-load", snapshots.report())
 		AddReportEntry("mapping-revision-read", revisions.report())
@@ -166,7 +169,8 @@ var _ = Describe("LabelSyncMapping performance measurements", Label("performance
 				Expect(result.LabelsChanged || result.OwnershipChanged).To(BeFalse())
 			})
 		}
-		Expect(samples.Transactions).To(Equal(int64(2 * labelSyncMeasurementRepetitions)))
+		Expect(samples.Transactions).To(Equal(int64(labelSyncMeasurementRepetitions)))
+		Expect(samples.Selects).To(Equal(5 * labelSyncMeasurementRepetitions))
 		Expect(samples.Updates).To(BeZero())
 		Expect(samples.Rollbacks).To(BeZero())
 		Expect(samples.Commits).To(Equal(samples.Transactions))

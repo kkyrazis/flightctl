@@ -218,6 +218,38 @@ var _ = Describe("Device label reconciliation worker", func() {
 		return *condition
 	}
 
+	It("When status events leave labels unchanged it should measure the event-driven worker path", Label("performance"), func() {
+		const repetitions = 20
+		createMapping("architecture", "architecture", "status.systemInfo.architecture")
+		device := createDevice("worker-performance", "x86_64", nil, nil)
+		device, status := deviceSvc.ReplaceDeviceStatus(ctx, orgID, "worker-performance", *device, true)
+		Expect(status.Code).To(Equal(int32(200)), status.Message)
+		Expect(newWorkerLogic(mappingSvc, createEventForDevice("worker-performance")).Reconcile(ctx)).To(Succeed())
+		baseline := len(statusEventsForDevice("worker-performance"))
+		durations := make([]time.Duration, 0, repetitions)
+		var total time.Duration
+		for i := 0; i < repetitions; i++ {
+			device.Status.SystemInfo.BootID = fmt.Sprintf("boot-%d", i)
+			device, status = deviceSvc.ReplaceDeviceStatus(ctx, orgID, "worker-performance", *device, true)
+			Expect(status.Code).To(Equal(int32(200)), status.Message)
+			events := statusEventsForDevice("worker-performance")
+			Expect(events).To(HaveLen(baseline + i + 1))
+			logic := newWorkerLogic(mappingSvc, events[len(events)-1])
+			started := time.Now()
+			Expect(logic.Reconcile(ctx)).To(Succeed())
+			duration := time.Since(started)
+			durations = append(durations, duration)
+			total += duration
+		}
+		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+		AddReportEntry("status-event-worker", map[string]any{
+			"operations": repetitions, "total": total.String(), "median": durations[repetitions/2].String(), "p95": durations[(repetitions*95-1)/100].String(),
+		})
+		persisted, err := deviceStore.Get(ctx, orgID, "worker-performance")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lo.FromPtr(persisted.Metadata.Labels)).To(HaveKeyWithValue("architecture", "x86_64"))
+	})
+
 	It("When identical agent statuses are repeated it should refresh liveness without scheduling label reconciliation", func() {
 		created := createDevice("heartbeat-only", "x86_64", nil, nil)
 		// Establish service-computed status before counting steady-state events.
