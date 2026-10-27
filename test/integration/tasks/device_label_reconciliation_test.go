@@ -218,6 +218,28 @@ var _ = Describe("Device label reconciliation worker", func() {
 		return *condition
 	}
 
+	It("When identical agent statuses are repeated it should refresh liveness without scheduling label reconciliation", func() {
+		created := createDevice("heartbeat-only", "x86_64", nil, nil)
+		// Establish service-computed status before counting steady-state events.
+		updated, status := deviceSvc.ReplaceDeviceStatus(ctx, orgID, "heartbeat-only", *created, true)
+		Expect(status.Code).To(Equal(int32(200)), status.Message)
+		baseline := len(statusEventsForDevice("heartbeat-only"))
+		lastSeen := updated.Status.LastSeen
+		for i := 0; i < 10; i++ {
+			updated, status = deviceSvc.ReplaceDeviceStatus(ctx, orgID, "heartbeat-only", *updated, true)
+			Expect(status.Code).To(Equal(int32(200)), status.Message)
+		}
+		Expect(updated.Status.LastSeen.After(*lastSeen)).To(BeTrue())
+		persisted, err := deviceStore.GetWithTimestamp(ctx, orgID, "heartbeat-only")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(persisted.Status.LastSeen.Before(*lastSeen)).To(BeFalse())
+		Expect(statusEventsForDevice("heartbeat-only")).To(HaveLen(baseline))
+		updated.Status.SystemInfo.Architecture = "aarch64"
+		_, status = deviceSvc.ReplaceDeviceStatus(ctx, orgID, "heartbeat-only", *updated, true)
+		Expect(status.Code).To(Equal(int32(200)), status.Message)
+		Expect(statusEventsForDevice("heartbeat-only")).To(HaveLen(baseline + 1))
+	})
+
 	It("acknowledges stale identity-only work for a device that no longer exists", func() {
 		event := domain.Event{
 			Reason: domain.EventReasonResourceUpdated,

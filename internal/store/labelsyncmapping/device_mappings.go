@@ -24,6 +24,25 @@ type DeviceMappingsSnapshot struct {
 	Revision int64
 }
 
+// GetDeviceMappingsRevision reads the current Device mapping revision. An
+// organization without a state row has revision zero.
+func (s *labelSyncMappingStore) GetDeviceMappingsRevision(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	return getDeviceMappingsRevision(store.DB(ctx, s.db), orgID)
+}
+
+func getDeviceMappingsRevision(db *gorm.DB, orgID uuid.UUID) (int64, error) {
+	var state model.LabelSyncState
+	err := db.Select("revision").
+		Where("org_id = ? AND resource_type = ?", orgID, domain.LabelSyncMappingDevice).Take(&state).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, store.ErrorFromGormError(err)
+	}
+	return state.Revision, nil
+}
+
 // GetDeviceMappingsSnapshot reads mappings and the revision from one
 // repeatable-read snapshot. Callers must pass a context without an existing
 // store transaction; otherwise the nested transaction will not establish the
@@ -45,16 +64,9 @@ func (s *labelSyncMappingStore) GetDeviceMappingsSnapshot(ctx context.Context, o
 			snapshot.Mappings = append(snapshot.Mappings, DeviceMapping{ID: mappings[i].ID, Mapping: *mapping})
 		}
 
-		var state model.LabelSyncState
-		err := tx.Where("org_id = ? AND resource_type = ?", orgID, domain.LabelSyncMappingDevice).Take(&state).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		if err != nil {
-			return store.ErrorFromGormError(err)
-		}
-		snapshot.Revision = state.Revision
-		return nil
+		var err error
+		snapshot.Revision, err = getDeviceMappingsRevision(tx, orgID)
+		return err
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return DeviceMappingsSnapshot{}, err

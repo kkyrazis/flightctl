@@ -34,7 +34,7 @@ func EmitDeviceUpdatedEvent(ctx context.Context, eventsService events.Service, l
 
 	// Only generate status change events when the device is not being created
 	if !created {
-		if oldDevice != nil && newDevice != nil && !reflect.DeepEqual(oldDevice.Status, newDevice.Status) {
+		if oldDevice != nil && newDevice != nil && !labelSyncStatusesEqual(oldDevice.Status, newDevice.Status) {
 			// Emit an identity-only update so the worker can reconcile from committed state.
 			// Focused events below describe known status transitions; mapped label changes
 			// are only known after all current mappings have been evaluated.
@@ -94,6 +94,16 @@ func EmitDeviceUpdatedEvent(ctx context.Context, eventsService events.Service, l
 	if holdStandalone {
 		emitStandalonePrepareDeltas(ctx, eventsService, log, orgId, name, newDevice)
 	}
+}
+
+func labelSyncStatusesEqual(oldStatus, newStatus *domain.DeviceStatus) bool {
+	if oldStatus == nil || newStatus == nil {
+		return oldStatus == newStatus
+	}
+	oldCopy, newCopy := *oldStatus, *newStatus
+	// LastSeen is a liveness signal excluded from the JSON exposed to CEL.
+	oldCopy.LastSeen, newCopy.LastSeen = nil, nil
+	return reflect.DeepEqual(oldCopy, newCopy)
 }
 
 func hasFleetOwner(device *domain.Device) bool {

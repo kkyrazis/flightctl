@@ -25,7 +25,8 @@ func (s *DeviceStore) GetLabelSnapshot(ctx context.Context, orgID uuid.UUID, nam
 	var snapshot domain.DeviceLabelSnapshot
 	err := s.getDB(ctx).Transaction(func(tx *gorm.DB) error {
 		var device model.Device
-		if err := tx.Where("org_id = ? AND name = ?", orgID, name).Take(&device).Error; err != nil {
+		if err := tx.Select("name", "created_at", "labels", "annotations", "generation", "owner", "resource_version", "spec", "status", "service_conditions").
+			Where("org_id = ? AND name = ?", orgID, name).Take(&device).Error; err != nil {
 			return store.ErrorFromGormError(err)
 		}
 		resource, err := device.ToApiResource()

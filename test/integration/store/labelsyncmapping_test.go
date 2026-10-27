@@ -28,6 +28,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var _ = Describe("LabelSyncMapping reconciliation", func() {
@@ -179,8 +180,55 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		Expect(domain.FindStatusCondition(persisted.Status.Conditions, domain.ConditionTypeDeviceLabelsSynced).Status).To(Equal(domain.ConditionStatusFalse))
 	})
 
+	It("When snapshots contain rendered payloads it should preserve ordinary device inputs and use narrow reconciliation reads", func() {
+		device := newLabelSyncDevice("projected-device", map[string]string{"manual": "keep"})
+		device.Metadata.Owner = lo.ToPtr("Fleet/edge")
+		device.Metadata.Annotations = lo.ToPtr(map[string]string{"example.com/source": "desired"})
+		device.Spec.Os = &domain.DeviceOsSpec{Image: "desired-image"}
+		device.Status = lo.ToPtr(domain.NewDeviceStatus())
+		device.Status.SystemInfo.Architecture = "x86_64"
+		domain.SetStatusCondition(&device.Status.Conditions, domain.Condition{Type: domain.ConditionTypeDeviceSpecValid, Status: domain.ConditionStatusTrue, Reason: "Valid"})
+		payload := `[{"name":"rendered","data":"` + strings.Repeat("x", 64*1024) + `"}]`
+		_, err := deviceStore.Create(ctx, orgID, device, &devicestore.DeviceRendered{
+			Config: payload, Applications: payload, OsImage: "rendered-image",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		expected, err := deviceStore.Get(ctx, orgID, "projected-device")
+		Expect(err).NotTo(HaveOccurred())
+		recorder := &labelSyncQueryRecorder{Interface: db.Logger}
+		observedDB := db.Session(&gorm.Session{Logger: recorder})
+		observedDevices := devicestore.NewDeviceStore(observedDB, log)
+		observedMappings := labelsyncmappingstore.NewStore(observedDB, log)
+		snapshot, err := observedDevices.GetLabelSnapshot(ctx, orgID, "projected-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snapshot.Device).To(Equal(*expected))
+		queries := recorder.drain()
+		Expect(queries).To(HaveLen(2))
+		Expect(queries[0]).To(ContainSubstring(`"service_conditions"`))
+		Expect(queries[0]).NotTo(ContainSubstring("rendered_"))
+		Expect(queries[0]).NotTo(ContainSubstring("SELECT *"))
+
+		_, err = observedMappings.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		Expect(err).NotTo(HaveOccurred())
+		evaluator, err := labelsyncmappingservice.NewEvaluator()
+		Expect(err).NotTo(HaveOccurred())
+		service, _ := newReconciliationService(observedDevices, observedMappings, evaluator, log)
+		_, err = service.ReconcileDeviceLabels(ctx, orgID, "projected-device")
+		Expect(err).NotTo(HaveOccurred())
+		recorder.drain()
+		result, err := service.ReconcileDeviceLabels(ctx, orgID, "projected-device")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.LabelsChanged).To(BeFalse())
+		queries = recorder.drain()
+		Expect(queries).To(HaveLen(6), strings.Join(queries, "\n"))
+		Expect(queries[5]).To(ContainSubstring(`SELECT "revision" FROM "label_sync_state"`))
+	})
+
 	It("When mapping state is loaded it should include current and terminating mappings with one revision", func() {
-		_, err := mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
+		revision, err := mappingStore.GetDeviceMappingsRevision(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revision).To(BeZero())
+		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("architecture", "architecture"))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = mappingStore.Create(ctx, orgID, newLabelSyncMapping("site", "site"))
 		Expect(err).NotTo(HaveOccurred())
@@ -193,6 +241,12 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		snapshot, err := mappingStore.GetDeviceMappingsSnapshot(ctx, orgID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(snapshot.Revision).To(Equal(int64(3)))
+		revision, err = mappingStore.GetDeviceMappingsRevision(ctx, orgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revision).To(Equal(snapshot.Revision))
+		otherRevision, err := mappingStore.GetDeviceMappingsRevision(ctx, otherOrgID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(otherRevision).To(Equal(int64(1)))
 		Expect(snapshot.Mappings).To(HaveLen(2))
 		byName := make(map[string]labelsyncmappingstore.DeviceMapping, len(snapshot.Mappings))
 		for _, mapping := range snapshot.Mappings {
@@ -1120,6 +1174,28 @@ var _ = Describe("LabelSyncMapping reconciliation", func() {
 		Expect(events.snapshot()).To(HaveLen(2))
 	})
 })
+
+type labelSyncQueryRecorder struct {
+	logger.Interface
+	mu      sync.Mutex
+	queries []string
+}
+
+func (r *labelSyncQueryRecorder) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	sql, rows := fc()
+	r.mu.Lock()
+	r.queries = append(r.queries, sql)
+	r.mu.Unlock()
+	r.Interface.Trace(ctx, begin, func() (string, int64) { return sql, rows }, err)
+}
+
+func (r *labelSyncQueryRecorder) drain() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	queries := r.queries
+	r.queries = nil
+	return queries
+}
 
 func newReconciliationService(deviceStore devicestore.Store, mappingStore labelsyncmappingstore.Store, evaluator labelsyncmappingservice.Evaluator, log *logrus.Logger) (labelsyncmappingservice.Service, *recordingEvents) {
 	events := &recordingEvents{}
